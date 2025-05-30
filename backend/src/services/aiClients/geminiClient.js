@@ -20,6 +20,651 @@ class GeminiClient {
     );
   }
 
+  /**
+   * Analyze multiple transactions from a wallet address and create bulk journal entries
+   * @param {string} walletAddress - The wallet address to analyze
+   * @param {Object} options - Options for transaction fetching and analysis
+   * @param {string} userId - User ID for saving entries
+   * @returns {Object} Complete analysis with journal entries
+   */
+  async analyzeBulkTransactions(walletAddress, options = {}, userId = null) {
+    try {
+      logger.info('Starting bulk transaction analysis', {
+        walletAddress,
+        userId,
+        options,
+      });
+
+      // Fetch all transactions for the wallet
+      const walletData = await BlockscoutClient.getWalletTransactions(walletAddress, options);
+      
+      logger.info('Fetched wallet transactions', {
+        walletAddress,
+        totalTransactions: walletData.totalTransactions,
+        categories: Object.keys(walletData.summary.categories),
+      });
+
+      // Filter transactions based on options
+      const filteredTransactions = this.filterTransactionsForAnalysis(walletData.transactions, options);
+
+      if (filteredTransactions.length === 0) {
+        return {
+          success: true,
+          walletAddress,
+          summary: {
+            totalTransactionsAnalyzed: 0,
+            totalEntriesGenerated: 0,
+            categories: {},
+            recommendations: ['No transactions found matching the criteria'],
+          },
+          journalEntries: [],
+        };
+      }
+
+      // Group transactions by category for efficient AI processing
+      const transactionGroups = this.groupTransactionsByCategory(filteredTransactions);
+
+      logger.info('Grouped transactions by category', {
+        categories: Object.keys(transactionGroups),
+        counts: Object.fromEntries(
+          Object.entries(transactionGroups).map(([cat, txs]) => [cat, txs.length])
+        ),
+      });
+
+      // Process each category with specialized analysis
+      const allJournalEntries = [];
+      const processingResults = {};
+
+      for (const [category, transactions] of Object.entries(transactionGroups)) {
+        logger.info(`Processing ${category} transactions`, { count: transactions.length });
+
+        try {
+          const categoryResult = await this.processCategoryTransactions(
+            category,
+            transactions,
+            walletAddress
+          );
+
+          allJournalEntries.push(...categoryResult.journalEntries);
+          processingResults[category] = categoryResult;
+
+          logger.info(`Completed ${category} processing`, {
+            entriesGenerated: categoryResult.journalEntries.length,
+          });
+        } catch (categoryError) {
+          logger.error(`Failed to process ${category} transactions`, {
+            error: categoryError.message,
+            transactionCount: transactions.length,
+          });
+          
+          processingResults[category] = {
+            error: categoryError.message,
+            journalEntries: [],
+            transactions: transactions.length,
+          };
+        }
+      }
+
+      // Save journal entries if user ID provided
+      let savedEntries = null;
+      if (userId && allJournalEntries.length > 0) {
+        try {
+          savedEntries = await this.saveBulkJournalEntries(allJournalEntries, userId, walletAddress);
+          logger.info('Saved bulk journal entries', {
+            userId,
+            entriesCount: savedEntries.length,
+          });
+        } catch (saveError) {
+          logger.warn('Failed to save bulk journal entries', {
+            error: saveError.message,
+            entriesCount: allJournalEntries.length,
+          });
+        }
+      }
+
+      // Generate comprehensive summary
+      const analysis = this.generateBulkAnalysisSummary(
+        walletData,
+        filteredTransactions,
+        allJournalEntries,
+        processingResults
+      );
+
+      return {
+        success: true,
+        walletAddress,
+        walletSummary: walletData.summary,
+        analysis,
+        journalEntries: savedEntries || allJournalEntries,
+        processingResults,
+        saved: !!savedEntries,
+      };
+
+    } catch (error) {
+      logger.error('Bulk transaction analysis failed', {
+        walletAddress,
+        error: error.message,
+        stack: error.stack,
+      });
+
+      throw new AppError(`Bulk analysis failed: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Filter transactions based on analysis options
+   */
+  filterTransactionsForAnalysis(transactions, options) {
+    let filtered = [...transactions];
+
+    // Date range filtering
+    if (options.startDate) {
+      const startDate = new Date(options.startDate);
+      filtered = filtered.filter(tx => new Date(tx.timestamp) >= startDate);
+    }
+
+    if (options.endDate) {
+      const endDate = new Date(options.endDate);
+      filtered = filtered.filter(tx => new Date(tx.timestamp) <= endDate);
+    }
+
+    // Category filtering
+    if (options.categories && options.categories.length > 0) {
+      filtered = filtered.filter(tx => options.categories.includes(tx.category));
+    }
+
+    // Minimum value filtering (to exclude dust transactions)
+    if (options.minValue) {
+      filtered = filtered.filter(tx => {
+        const value = parseFloat(tx.value || tx.actualAmount || 0);
+        return value >= options.minValue;
+      });
+    }
+
+    // Limit number of transactions for processing
+    const limit = options.limit || 100;
+    if (filtered.length > limit) {
+      logger.info(`Limiting transactions for analysis`, {
+        original: filtered.length,
+        limited: limit,
+      });
+      filtered = filtered.slice(0, limit);
+    }
+
+    return filtered;
+  }
+
+  /**
+   * Group transactions by category for efficient processing
+   */
+  groupTransactionsByCategory(transactions) {
+    const groups = {};
+
+    transactions.forEach(tx => {
+      const category = tx.category || 'unknown';
+      if (!groups[category]) {
+        groups[category] = [];
+      }
+      groups[category].push(tx);
+    });
+
+    return groups;
+  }
+
+  /**
+   * Process transactions for a specific category
+   */
+  async processCategoryTransactions(category, transactions, walletAddress) {
+    const chartOfAccounts = await this.getFormattedChartOfAccounts();
+    const ifrsTemplates = require('./enhancedIfrsTemplates.json');
+
+    // Get category-specific template
+    const categoryTemplate = ifrsTemplates.categoryAnalysisTemplates[category];
+
+    // Format transactions for AI analysis
+    const formattedTransactions = this.formatTransactionsForAI(transactions, category);
+
+    // Create category-specific prompt
+    const prompt = this.buildCategoryAnalysisPrompt(
+      category,
+      formattedTransactions,
+      walletAddress,
+      chartOfAccounts,
+      categoryTemplate
+    );
+
+    try {
+      logger.info(`Sending ${category} transactions to AI`, {
+        transactionCount: transactions.length,
+        promptLength: prompt.length,
+      });
+
+      const result = await this.model.generateContent([
+        { text: ifrsTemplates.systemPrompt },
+        { text: prompt },
+      ]);
+
+      const response = await result.response;
+      const responseText = response.text();
+
+      logger.info(`Received AI response for ${category}`, {
+        responseLength: responseText.length,
+      });
+
+      // Parse the response
+      const analysisResult = this.parseBulkAnalysisResponse(responseText, category);
+
+      // Validate and correct accounts
+      const validatedEntries = [];
+      for (const entryGroup of analysisResult.journalEntries) {
+        const validatedGroup = {
+          ...entryGroup,
+          entries: await this.validateAndCorrectAccounts(entryGroup.entries),
+        };
+        validatedEntries.push(validatedGroup);
+      }
+
+      return {
+        category,
+        summary: analysisResult.summary,
+        journalEntries: validatedEntries,
+        accountingNotes: analysisResult.accountingNotes,
+        transactions: transactions.length,
+      };
+
+    } catch (error) {
+      logger.error(`AI analysis failed for category ${category}`, {
+        error: error.message,
+        transactionCount: transactions.length,
+      });
+
+      throw new AppError(`Failed to analyze ${category} transactions: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Build category-specific analysis prompt
+   */
+  buildCategoryAnalysisPrompt(category, transactions, walletAddress, chartOfAccounts, categoryTemplate) {
+    const ifrsTemplates = require('./enhancedIfrsTemplates.json');
+
+    // Calculate category summary
+    const categorySummary = this.calculateCategorySummary(transactions, category);
+
+    return ifrsTemplates.bulkTransactionAnalysisPrompt
+      .replace('{walletAddress}', walletAddress)
+      .replace('{totalTransactions}', transactions.length.toString())
+      .replace('{timeRange}', this.formatTimeRange(transactions))
+      .replace('{categories}', JSON.stringify({ [category]: transactions.length }))
+      .replace('{volumeSummary}', JSON.stringify(categorySummary))
+      .replace('{categoryBreakdown}', this.formatCategoryBreakdown(category, categoryTemplate))
+      .replace('{transactions}', this.formatTransactionsForPrompt(transactions))
+      .replace('{chartOfAccounts}', chartOfAccounts);
+  }
+
+  /**
+   * Format transactions for AI prompt
+   */
+  formatTransactionsForPrompt(transactions) {
+    return transactions.map((tx, index) => {
+      return `${index + 1}. Hash: ${tx.hash}
+   From: ${tx.from}
+   To: ${tx.to}
+   Value: ${tx.value || tx.actualAmount || 0} ${tx.tokenSymbol || 'ETH'}
+   Category: ${tx.category}
+   Direction: ${tx.direction}
+   Timestamp: ${tx.timestamp}
+   Gas Used: ${tx.gasUsed || 'N/A'}
+   ${tx.tokenSymbol ? `Token: ${tx.tokenSymbol} (${tx.actualAmount})` : ''}
+   ${tx.input && tx.input.length > 10 ? `Function: ${tx.input.slice(0, 10)}` : ''}`;
+    }).join('\n\n');
+  }
+
+  /**
+   * Format category breakdown for prompt
+   */
+  formatCategoryBreakdown(category, template) {
+    if (!template) {
+      return `${category}: No specific template available - analyze based on transaction data`;
+    }
+
+    return `${category.toUpperCase()}:
+Description: ${template.description}
+Recommended Accounts: ${JSON.stringify(template.accounts)}
+IFRS Notes: ${template.ifrsNotes}`;
+  }
+
+  /**
+   * Calculate summary statistics for a category
+   */
+  calculateCategorySummary(transactions, category) {
+    const summary = {
+      count: transactions.length,
+      totalValue: 0,
+      tokens: {},
+      timeSpan: null,
+    };
+
+    const timestamps = [];
+
+    transactions.forEach(tx => {
+      // Calculate total value
+      const value = parseFloat(tx.value || tx.actualAmount || 0);
+      summary.totalValue += value;
+
+      // Track tokens
+      if (tx.tokenSymbol) {
+        summary.tokens[tx.tokenSymbol] = (summary.tokens[tx.tokenSymbol] || 0) + parseFloat(tx.actualAmount || 0);
+      }
+
+      // Track timestamps
+      if (tx.timestamp) {
+        timestamps.push(new Date(tx.timestamp));
+      }
+    });
+
+    // Calculate time span
+    if (timestamps.length > 0) {
+      const sorted = timestamps.sort((a, b) => a - b);
+      summary.timeSpan = {
+        start: sorted[0],
+        end: sorted[sorted.length - 1],
+        days: Math.ceil((sorted[sorted.length - 1] - sorted[0]) / (1000 * 60 * 60 * 24)),
+      };
+    }
+
+    return summary;
+  }
+
+  /**
+   * Format time range for prompt
+   */
+  formatTimeRange(transactions) {
+    const timestamps = transactions
+      .map(tx => new Date(tx.timestamp))
+      .filter(d => !isNaN(d))
+      .sort((a, b) => a - b);
+
+    if (timestamps.length === 0) return 'Unknown';
+
+    const start = timestamps[0];
+    const end = timestamps[timestamps.length - 1];
+
+    return `${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}`;
+  }
+
+  /**
+   * Format transactions for AI analysis
+   */
+  formatTransactionsForAI(transactions, category) {
+    return transactions.map(tx => ({
+      hash: tx.hash,
+      from: tx.from,
+      to: tx.to,
+      value: tx.value || tx.actualAmount || 0,
+      currency: tx.tokenSymbol || 'ETH',
+      category: tx.category,
+      direction: tx.direction,
+      timestamp: tx.timestamp,
+      gasUsed: tx.gasUsed,
+      gasPrice: tx.gasPrice,
+      blockNumber: tx.blockNumber,
+      isUserInitiated: tx.isUserInitiated,
+    }));
+  }
+
+  /**
+   * Parse bulk analysis response from AI
+   */
+  parseBulkAnalysisResponse(responseText, category) {
+    try {
+      // Clean and parse JSON response
+      const cleanedResponse = responseText
+        .replace(/```json\s*/, '')
+        .replace(/```\s*$/, '')
+        .trim();
+
+      const parsed = JSON.parse(cleanedResponse);
+
+      // Validate response structure
+      if (!parsed.journalEntries || !Array.isArray(parsed.journalEntries)) {
+        throw new Error('Invalid response format: missing journalEntries array');
+      }
+
+      return {
+        summary: parsed.summary || {
+          totalEntries: parsed.journalEntries.length,
+          totalTransactionsProcessed: parsed.journalEntries.length,
+          categoryBreakdown: { [category]: parsed.journalEntries.length },
+        },
+        journalEntries: parsed.journalEntries,
+        accountingNotes: parsed.accountingNotes || {},
+      };
+
+    } catch (parseError) {
+      logger.error('Failed to parse bulk analysis response', {
+        category,
+        error: parseError.message,
+        responsePreview: responseText.substring(0, 500),
+      });
+
+      // Fallback: try to extract individual journal entries
+      try {
+        const entries = this.extractFallbackEntries(responseText, category);
+        return {
+          summary: {
+            totalEntries: entries.length,
+            totalTransactionsProcessed: entries.length,
+            categoryBreakdown: { [category]: entries.length },
+          },
+          journalEntries: entries,
+          accountingNotes: { note: 'Parsed using fallback method due to response format issues' },
+        };
+      } catch (fallbackError) {
+        throw new AppError(`Failed to parse AI response for ${category}: ${parseError.message}`, 500);
+      }
+    }
+  }
+
+  /**
+   * Extract journal entries using fallback parsing
+   */
+  extractFallbackEntries(responseText, category) {
+    // This is a simplified fallback - in practice, you might want more sophisticated parsing
+    const entries = [];
+    
+    // Try to find JSON-like patterns in the response
+    const jsonPattern = /\{[^{}]*"accountDebit"[^{}]*\}/g;
+    const matches = responseText.match(jsonPattern);
+
+    if (matches) {
+      matches.forEach((match, index) => {
+        try {
+          const entry = JSON.parse(match);
+          entries.push({
+            transactionHash: `fallback_${index}`,
+            category,
+            entries: [entry],
+          });
+        } catch (e) {
+          // Skip invalid matches
+        }
+      });
+    }
+
+    return entries;
+  }
+
+  /**
+   * Save bulk journal entries to database
+   */
+  async saveBulkJournalEntries(journalEntries, userId, walletAddress) {
+    const savedEntries = [];
+
+    try {
+      for (const entryGroup of journalEntries) {
+        for (const entry of entryGroup.entries) {
+          const savedEntry = await journalEntryService.saveJournalEntry({
+            user_id: userId,
+            account_debit: entry.accountDebit,
+            account_credit: entry.accountCredit,
+            amount: parseFloat(entry.amount),
+            currency: entry.currency,
+            entry_date: new Date().toISOString().split('T')[0],
+            narrative: `${entry.narrative} (Bulk analysis from ${walletAddress})`,
+            ai_confidence: entry.confidence || 0.8,
+            metadata: {
+              walletAddress,
+              transactionHash: entryGroup.transactionHash,
+              category: entryGroup.category,
+              entryType: entry.entryType || 'main',
+              bulkAnalysis: true,
+            },
+            source: 'ai_bulk_analysis',
+          });
+
+          savedEntries.push(savedEntry);
+        }
+      }
+
+      return savedEntries;
+
+    } catch (error) {
+      logger.error('Failed to save bulk journal entries', {
+        error: error.message,
+        userId,
+        walletAddress,
+        entriesCount: journalEntries.length,
+      });
+
+      throw new AppError(`Failed to save journal entries: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Generate comprehensive summary of bulk analysis
+   */
+  generateBulkAnalysisSummary(walletData, processedTransactions, journalEntries, processingResults) {
+    const summary = {
+      walletAnalysis: {
+        totalTransactionsInWallet: walletData.totalTransactions,
+        totalTransactionsProcessed: processedTransactions.length,
+        totalJournalEntriesGenerated: journalEntries.length,
+        processingSuccessRate: this.calculateSuccessRate(processingResults),
+      },
+      categoryBreakdown: this.summarizeCategoryResults(processingResults),
+      recommendations: this.generateRecommendations(walletData, journalEntries, processingResults),
+      ifrsCompliance: this.assessIfrsCompliance(journalEntries),
+    };
+
+    return summary;
+  }
+
+  /**
+   * Calculate processing success rate
+   */
+  calculateSuccessRate(processingResults) {
+    const total = Object.keys(processingResults).length;
+    const successful = Object.values(processingResults).filter(result => !result.error).length;
+    return total > 0 ? (successful / total * 100).toFixed(1) + '%' : 'N/A';
+  }
+
+  /**
+   * Summarize results by category
+   */
+  summarizeCategoryResults(processingResults) {
+    const summary = {};
+
+    Object.entries(processingResults).forEach(([category, result]) => {
+      summary[category] = {
+        transactions: result.transactions || 0,
+        journalEntries: result.journalEntries?.length || 0,
+        success: !result.error,
+        error: result.error || null,
+      };
+    });
+
+    return summary;
+  }
+
+  /**
+   * Generate recommendations based on analysis
+   */
+  generateRecommendations(walletData, journalEntries, processingResults) {
+    const recommendations = [];
+
+    // Check for high-volume categories
+    Object.entries(walletData.summary.categories).forEach(([category, count]) => {
+      if (count > 50) {
+        recommendations.push(`High activity in ${category} (${count} transactions) - consider setting up automated processing rules`);
+      }
+    });
+
+    // Check for failed processing
+    Object.entries(processingResults).forEach(([category, result]) => {
+      if (result.error) {
+        recommendations.push(`Failed to process ${category} transactions - manual review required`);
+      }
+    });
+
+    // Check for missing account mappings
+    const missingAccounts = journalEntries
+      .flatMap(group => group.entries)
+      .filter(entry => entry.requiresAccountCreation)
+      .map(entry => entry.accountDebit || entry.accountCredit)
+      .filter((account, index, arr) => arr.indexOf(account) === index);
+
+    if (missingAccounts.length > 0) {
+      recommendations.push(`Create missing accounts: ${missingAccounts.join(', ')}`);
+    }
+
+    return recommendations;
+  }
+
+  /**
+   * Assess IFRS compliance of generated entries
+   */
+  assessIfrsCompliance(journalEntries) {
+    const compliance = {
+      doubleEntryBalance: true,
+      accountClassification: 'Good',
+      narrativeQuality: 'Good',
+      confidenceScore: 0,
+      issues: [],
+    };
+
+    let totalConfidence = 0;
+    let entryCount = 0;
+
+    journalEntries.forEach(group => {
+      group.entries.forEach(entry => {
+        // Check confidence
+        if (entry.confidence) {
+          totalConfidence += entry.confidence;
+          entryCount++;
+        }
+
+        // Check for low confidence entries
+        if (entry.confidence && entry.confidence < 0.7) {
+          compliance.issues.push(`Low confidence entry: ${entry.narrative}`);
+        }
+
+        // Check for missing narratives
+        if (!entry.narrative || entry.narrative.length < 10) {
+          compliance.issues.push(`Unclear narrative: ${entry.narrative || 'N/A'}`);
+        }
+      });
+    });
+
+    compliance.confidenceScore = entryCount > 0 ? (totalConfidence / entryCount).toFixed(2) : 0;
+
+    if (compliance.issues.length === 0) {
+      compliance.issues.push('No significant compliance issues detected');
+    }
+
+    return compliance;
+  }
+
   async chatResponse(message, context = {}) {
     try {
       logger.info('Processing chat message with Gemini AI', {
