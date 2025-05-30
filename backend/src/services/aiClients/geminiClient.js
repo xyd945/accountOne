@@ -29,25 +29,45 @@ class GeminiClient {
    */
   async analyzeBulkTransactions(walletAddress, options = {}, userId = null) {
     try {
-      logger.info('Starting bulk transaction analysis', {
+      logger.info('🚀 Starting bulk transaction analysis', {
         walletAddress,
         userId,
         options,
+        step: 'initialization',
+        message: 'Beginning comprehensive wallet analysis process'
       });
 
       // Fetch all transactions for the wallet
+      logger.info('📡 Fetching blockchain data', {
+        walletAddress,
+        step: 'blockchain_fetch',
+        message: 'Connecting to blockchain API to retrieve transaction history'
+      });
+
       const walletData = await BlockscoutClient.getWalletTransactions(walletAddress, options);
       
-      logger.info('Fetched wallet transactions', {
+      logger.info('✅ Blockchain data retrieved successfully', {
         walletAddress,
         totalTransactions: walletData.totalTransactions,
         categories: Object.keys(walletData.summary.categories),
+        step: 'blockchain_complete',
+        message: `Found ${walletData.totalTransactions} transactions across ${Object.keys(walletData.summary.categories).length} categories`
       });
 
       // Filter transactions based on options
+      logger.info('🔍 Filtering transactions for analysis', {
+        step: 'transaction_filter',
+        message: 'Applying user-specified filters and limits'
+      });
+
       const filteredTransactions = this.filterTransactionsForAnalysis(walletData.transactions, options);
 
       if (filteredTransactions.length === 0) {
+        logger.info('⚠️ No transactions match analysis criteria', {
+          step: 'no_transactions',
+          message: 'Filters resulted in zero transactions to analyze'
+        });
+
         return {
           success: true,
           walletAddress,
@@ -62,21 +82,37 @@ class GeminiClient {
       }
 
       // Group transactions by category for efficient AI processing
+      logger.info('📊 Categorizing transactions', {
+        step: 'categorization',
+        message: `Organizing ${filteredTransactions.length} transactions by type for AI processing`
+      });
+
       const transactionGroups = this.groupTransactionsByCategory(filteredTransactions);
 
-      logger.info('Grouped transactions by category', {
+      logger.info('✅ Transaction categorization complete', {
         categories: Object.keys(transactionGroups),
         counts: Object.fromEntries(
           Object.entries(transactionGroups).map(([cat, txs]) => [cat, txs.length])
         ),
+        step: 'categorization_complete',
+        message: `Grouped into ${Object.keys(transactionGroups).length} categories for specialized analysis`
       });
 
       // Process each category with specialized analysis
       const allJournalEntries = [];
       const processingResults = {};
 
+      logger.info('🤖 Starting AI analysis phase', {
+        step: 'ai_analysis_start',
+        message: 'Beginning category-by-category AI processing'
+      });
+
       for (const [category, transactions] of Object.entries(transactionGroups)) {
-        logger.info(`Processing ${category} transactions`, { count: transactions.length });
+        logger.info(`🔄 Processing ${category} transactions`, { 
+          count: transactions.length,
+          step: `ai_process_${category}`,
+          message: `Analyzing ${transactions.length} ${category} transactions with specialized AI prompts`
+        });
 
         try {
           const categoryResult = await this.processCategoryTransactions(
@@ -88,13 +124,17 @@ class GeminiClient {
           allJournalEntries.push(...categoryResult.journalEntries);
           processingResults[category] = categoryResult;
 
-          logger.info(`Completed ${category} processing`, {
+          logger.info(`✅ Completed ${category} processing`, {
             entriesGenerated: categoryResult.journalEntries.length,
+            step: `ai_complete_${category}`,
+            message: `Generated ${categoryResult.journalEntries.length} journal entries for ${category}`
           });
         } catch (categoryError) {
-          logger.error(`Failed to process ${category} transactions`, {
+          logger.error(`❌ Failed to process ${category} transactions`, {
             error: categoryError.message,
             transactionCount: transactions.length,
+            step: `ai_error_${category}`,
+            message: `AI processing failed for ${category} category`
           });
           
           processingResults[category] = {
@@ -105,30 +145,63 @@ class GeminiClient {
         }
       }
 
+      logger.info('🏁 AI analysis phase complete', {
+        totalEntries: allJournalEntries.length,
+        successfulCategories: Object.values(processingResults).filter(r => !r.error).length,
+        step: 'ai_analysis_complete',
+        message: `Generated ${allJournalEntries.length} total journal entries`
+      });
+
       // Save journal entries if user ID provided
       let savedEntries = null;
       if (userId && allJournalEntries.length > 0) {
         try {
+          logger.info('💾 Saving journal entries to database', {
+            userId,
+            entriesCount: allJournalEntries.length,
+            step: 'database_save',
+            message: 'Persisting generated journal entries to user account'
+          });
+
           savedEntries = await this.saveBulkJournalEntries(allJournalEntries, userId, walletAddress);
-          logger.info('Saved bulk journal entries', {
+          
+          logger.info('✅ Journal entries saved successfully', {
             userId,
             entriesCount: savedEntries.length,
+            step: 'database_complete',
+            message: `Successfully saved ${savedEntries.length} journal entries`
           });
         } catch (saveError) {
-          logger.warn('Failed to save bulk journal entries', {
+          logger.warn('⚠️ Failed to save bulk journal entries', {
             error: saveError.message,
             entriesCount: allJournalEntries.length,
+            step: 'database_error',
+            message: 'Database save operation failed, entries available for manual review'
           });
         }
       }
 
       // Generate comprehensive summary
+      logger.info('📋 Generating analysis summary', {
+        step: 'summary_generation',
+        message: 'Compiling comprehensive analysis report and recommendations'
+      });
+
       const analysis = this.generateBulkAnalysisSummary(
         walletData,
         filteredTransactions,
         allJournalEntries,
         processingResults
       );
+
+      logger.info('🎉 Bulk transaction analysis completed successfully', {
+        walletAddress,
+        totalTransactions: analysis.walletAnalysis?.totalTransactionsProcessed || 0,
+        totalEntries: analysis.walletAnalysis?.totalJournalEntriesGenerated || 0,
+        successRate: analysis.walletAnalysis?.processingSuccessRate || 'N/A',
+        step: 'analysis_complete',
+        message: 'Full wallet analysis pipeline completed successfully'
+      });
 
       return {
         success: true,
@@ -138,13 +211,16 @@ class GeminiClient {
         journalEntries: savedEntries || allJournalEntries,
         processingResults,
         saved: !!savedEntries,
+        startTime: Date.now(), // For timing calculations
       };
 
     } catch (error) {
-      logger.error('Bulk transaction analysis failed', {
+      logger.error('💥 Bulk transaction analysis failed', {
         walletAddress,
         error: error.message,
         stack: error.stack,
+        step: 'analysis_fatal_error',
+        message: 'Critical failure in wallet analysis pipeline'
       });
 
       throw new AppError(`Bulk analysis failed: ${error.message}`, 500);
@@ -672,12 +748,20 @@ IFRS Notes: ${template.ifrsNotes}`;
         hasContext: Object.keys(context).length > 0,
       });
 
-      // Check if user is asking to create a journal entry
+      // Check what type of request this is
       const isJournalEntryRequest = this.isJournalEntryRequest(message);
-      logger.info('Journal entry request detected', { isJournalEntryRequest });
+      const isWalletAnalysisRequest = this.isWalletAnalysisRequest(message);
+      
+      logger.info('Request type detection', { 
+        isJournalEntryRequest, 
+        isWalletAnalysisRequest 
+      });
 
       let result;
-      if (isJournalEntryRequest) {
+      if (isWalletAnalysisRequest) {
+        logger.info('Handling wallet analysis request');
+        result = await this.handleWalletAnalysisChat(message, context);
+      } else if (isJournalEntryRequest) {
         logger.info('Handling journal entry chat');
         result = await this.handleJournalEntryChat(message, context);
       } else {
@@ -710,6 +794,241 @@ IFRS Notes: ${template.ifrsNotes}`;
     }
   }
 
+  /**
+   * Handle wallet analysis requests from chat
+   */
+  async handleWalletAnalysisChat(message, context) {
+    try {
+      logger.info('Starting wallet analysis chat handler', { messageLength: message.length });
+      
+      // Extract wallet address from message
+      const walletAddress = this.extractWalletAddress(message);
+      
+      if (!walletAddress) {
+        return {
+          response: 'I can see you want to analyze a wallet, but I couldn\'t find a valid Ethereum address in your message. Please provide a wallet address starting with 0x followed by 40 characters.\n\nExample: "Analyze wallet 0x742e8c9b3be7936e2f6d143de3e9bb8f4b4d2b9e"',
+          thinking: 'User requested wallet analysis but no valid Ethereum address was found in the message.',
+          suggestions: [
+            'Provide a valid Ethereum wallet address (0x...)',
+            'Make sure the address is complete (42 characters total)',
+            'Double-check the address format'
+          ],
+          journalEntries: [],
+        };
+      }
+
+      logger.info('🔍 Wallet Analysis Started', { 
+        walletAddress,
+        step: 'initialization',
+        message: 'Extracted wallet address from user message'
+      });
+
+      // Determine analysis options based on message content
+      const options = this.parseAnalysisOptionsFromMessage(message);
+      logger.info('📋 Analysis Options Parsed', { 
+        options,
+        step: 'options',
+        message: 'Configured analysis parameters based on user message'
+      });
+
+      try {
+        // Perform bulk analysis with progress logging
+        logger.info('🚀 Starting Bulk Transaction Analysis', { 
+          walletAddress, 
+          options,
+          step: 'analysis_start',
+          message: 'Beginning comprehensive blockchain data analysis'
+        });
+        
+        const analysis = await this.analyzeBulkTransactions(
+          walletAddress,
+          {
+            limit: options.limit || 20, // Reasonable default for chat
+            minValue: options.minValue || 0.001,
+            categories: options.categories,
+            saveEntries: context.user?.id ? (options.saveEntries !== false) : false,
+            includeTokens: true,
+            includeInternal: true,
+          },
+          context.user?.id || null
+        );
+
+        logger.info('✅ Bulk Wallet Analysis Completed Successfully', {
+          walletAddress,
+          totalTransactions: analysis.analysis?.walletAnalysis?.totalTransactionsProcessed || 0,
+          totalEntries: analysis.analysis?.walletAnalysis?.totalJournalEntriesGenerated || 0,
+          step: 'analysis_complete',
+          message: 'All transactions processed and journal entries generated'
+        });
+
+        // Format response for chat
+        const summary = analysis.analysis?.walletAnalysis || {};
+        const entriesGenerated = summary.totalJournalEntriesGenerated || 0;
+        const transactionsProcessed = summary.totalTransactionsProcessed || 0;
+
+        let response = `✅ **Wallet Analysis Completed!**\n\n`;
+        response += `📍 **Address:** ${walletAddress}\n`;
+        response += `📊 **Results:**\n`;
+        response += `• Transactions Processed: ${transactionsProcessed}\n`;
+        response += `• Journal Entries Generated: ${entriesGenerated}\n`;
+        response += `• Success Rate: ${summary.processingSuccessRate || 'N/A'}\n\n`;
+
+        if (analysis.journalEntries && analysis.journalEntries.length > 0) {
+          response += `💰 **Sample Journal Entries:**\n\n`;
+          
+          // Show first 3 entries
+          analysis.journalEntries.slice(0, 3).forEach((entryGroup, index) => {
+            response += `**${index + 1}. ${entryGroup.category?.toUpperCase() || 'TRANSACTION'}**\n`;
+            entryGroup.entries.forEach((entry, entryIndex) => {
+              response += `• Debit: ${entry.accountDebit} (${entry.amount} ${entry.currency})\n`;
+              response += `• Credit: ${entry.accountCredit}\n`;
+              response += `• Narrative: ${entry.narrative}\n`;
+              if (entryIndex < entryGroup.entries.length - 1) response += `\n`;
+            });
+            if (index < 2 && index < analysis.journalEntries.length - 1) response += `\n---\n\n`;
+          });
+
+          if (analysis.journalEntries.length > 3) {
+            response += `\n... and ${analysis.journalEntries.length - 3} more entries.`;
+          }
+        }
+
+        // Add save status
+        if (context.user?.id) {
+          if (analysis.saved) {
+            response += `\n\n✅ **All journal entries have been saved to your accounting system.**`;
+          } else {
+            response += `\n\n⚠️ **Note:** Some entries may not have been saved. Please check your journal.`;
+          }
+        } else {
+          response += `\n\n💡 **Tip:** Log in to automatically save journal entries to your accounting system.`;
+        }
+
+        // Add recommendations
+        if (analysis.analysis?.recommendations && analysis.analysis.recommendations.length > 0) {
+          response += `\n\n💡 **Recommendations:**\n`;
+          analysis.analysis.recommendations.forEach(rec => {
+            response += `• ${rec}\n`;
+          });
+        }
+
+        // Add detailed thinking process
+        const thinkingProcess = `🧠 **Analysis Process Completed:**
+
+1. **Address Extraction:** Successfully identified wallet ${walletAddress}
+2. **Transaction Fetch:** Retrieved ${transactionsProcessed} blockchain transactions
+3. **Categorization:** Classified transactions into accounting categories
+4. **AI Processing:** Generated ${entriesGenerated} IFRS-compliant journal entries
+5. **Account Validation:** Verified account mappings and suggested new accounts
+6. **Data Persistence:** ${analysis.saved ? 'Saved entries to database' : 'Entries ready for review'}
+
+**Processing Time:** ~${((Date.now() - (analysis.startTime || Date.now())) / 1000).toFixed(1)} seconds
+**AI Confidence:** ${analysis.analysis?.ifrsCompliance?.confidenceScore || 'N/A'}
+**Success Rate:** ${summary.processingSuccessRate || 'N/A'}`;
+
+        return {
+          response,
+          thinking: thinkingProcess,
+          suggestions: [
+            'Review the generated journal entries for accuracy',
+            'Check if any accounts need to be created',
+            'Consider adjusting analysis filters for different results',
+            entriesGenerated > 0 ? 'Verify the accounting treatment is appropriate' : 'Try analyzing with different filters or categories'
+          ],
+          journalEntries: analysis.journalEntries || [],
+          processingComplete: true,
+          walletAddress,
+          analysisMetrics: {
+            transactionsProcessed,
+            entriesGenerated,
+            successRate: summary.processingSuccessRate,
+            categoriesFound: Object.keys(analysis.analysis?.categoryBreakdown || {}),
+          }
+        };
+
+      } catch (analysisError) {
+        logger.error('❌ Wallet Analysis Failed', {
+          walletAddress,
+          error: analysisError.message,
+          step: 'analysis_error',
+          message: 'Analysis process encountered an error'
+        });
+
+        return {
+          response: `❌ **Wallet Analysis Failed**\n\nI encountered an error while analyzing wallet ${walletAddress}:\n\n• ${analysisError.message}\n\nThis could be due to:\n• Network connectivity issues\n• Invalid wallet address\n• No transactions found\n• API rate limits\n\nPlease try again in a few moments.`,
+          thinking: `Failed to analyze wallet ${walletAddress} due to error: ${analysisError.message}. This could be a temporary issue with blockchain APIs or network connectivity.`,
+          suggestions: [
+            'Verify the wallet address is correct',
+            'Try again in a few minutes',
+            'Check if the wallet has any transactions',
+            'Use a different wallet address for testing'
+          ],
+          journalEntries: [],
+          processingComplete: false,
+          error: analysisError.message,
+        };
+      }
+
+    } catch (error) {
+      logger.error('💥 Wallet Analysis Handler Error', {
+        error: error.message,
+        stack: error.stack,
+        messagePreview: message.substring(0, 100),
+        step: 'handler_error',
+        message: 'Critical error in wallet analysis handler'
+      });
+
+      return {
+        response: 'I encountered an error while processing your wallet analysis request. Please try again with a valid Ethereum wallet address.',
+        thinking: `Critical error in wallet analysis handler: ${error.message}. This indicates a system-level issue that needs attention.`,
+        suggestions: ['Try rephrasing your request', 'Provide a valid Ethereum address'],
+        journalEntries: [],
+        processingComplete: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Parse analysis options from user message
+   */
+  parseAnalysisOptionsFromMessage(message) {
+    const lowerMessage = message.toLowerCase();
+    const options = {};
+
+    // Parse limit
+    const limitMatch = message.match(/(?:limit|max|maximum)\s*:?\s*(\d+)/i);
+    if (limitMatch) {
+      options.limit = parseInt(limitMatch[1]);
+    }
+
+    // Parse minimum value
+    const minValueMatch = message.match(/(?:min|minimum)\s*(?:value)?\s*:?\s*([\d.]+)/i);
+    if (minValueMatch) {
+      options.minValue = parseFloat(minValueMatch[1]);
+    }
+
+    // Parse categories
+    const categories = [];
+    if (lowerMessage.includes('staking')) categories.push('staking');
+    if (lowerMessage.includes('trading') || lowerMessage.includes('dex') || lowerMessage.includes('swap')) categories.push('dex_trade');
+    if (lowerMessage.includes('lending') || lowerMessage.includes('defi')) categories.push('lending');
+    if (lowerMessage.includes('token') || lowerMessage.includes('transfer')) categories.push('token_transfer');
+    if (lowerMessage.includes('nft')) categories.push('nft');
+    if (lowerMessage.includes('liquidity')) categories.push('liquidity_provision');
+
+    if (categories.length > 0) {
+      options.categories = categories;
+    }
+
+    // Parse save preference
+    if (lowerMessage.includes('don\'t save') || lowerMessage.includes('do not save') || lowerMessage.includes('preview')) {
+      options.saveEntries = false;
+    }
+
+    return options;
+  }
+
   isJournalEntryRequest(message) {
     const journalKeywords = [
       'create journal entry',
@@ -726,6 +1045,49 @@ IFRS Notes: ${template.ifrsNotes}`;
 
     const lowerMessage = message.toLowerCase();
     return journalKeywords.some(keyword => lowerMessage.includes(keyword));
+  }
+
+  /**
+   * Check if message is requesting wallet address analysis
+   */
+  isWalletAnalysisRequest(message) {
+    const walletKeywords = [
+      'analyze wallet',
+      'analyze address',
+      'wallet analysis',
+      'analyze entire',
+      'analyze all transactions',
+      'create journal entries for',
+      'bulk analyze',
+      'process wallet',
+      'transaction history',
+      'analyze 0x',
+      'analyze the wallet',
+      'analyze this wallet',
+      'bulk process'
+    ];
+
+    const lowerMessage = message.toLowerCase();
+    const hasWalletKeyword = walletKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Also check if message contains an Ethereum address (0x followed by 40 hex characters)
+    const hasEthAddress = /0x[a-fA-F0-9]{40}/.test(message);
+    
+    return hasWalletKeyword || (hasEthAddress && (
+      lowerMessage.includes('analyze') || 
+      lowerMessage.includes('journal') || 
+      lowerMessage.includes('process') ||
+      lowerMessage.includes('create') ||
+      lowerMessage.includes('transactions')
+    ));
+  }
+
+  /**
+   * Extract wallet address from message
+   */
+  extractWalletAddress(message) {
+    const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
+    return addressMatch ? addressMatch[0] : null;
   }
 
   async handleJournalEntryChat(message, context) {
