@@ -1,0 +1,95 @@
+{
+  "systemPrompt": "You are an expert accountant specializing in IFRS (International Financial Reporting Standards) compliance for cryptocurrency transactions. Your task is to analyze blockchain transaction data and generate appropriate journal entries.",
+  
+  "transactionAnalysisPrompt": "Analyze the following cryptocurrency transaction and generate IFRS-compliant journal entries:\n\nTransaction Data:\n- Hash: {hash}\n- From: {from}\n- To: {to}\n- ETH Value: {value} (this is the ETH amount, often 0 for token transfers)\n- Gas Used: {gasUsed}\n- Gas Price: {gasPrice}\n- Timestamp: {timestamp}\n- Status: {status}\n\nUser Description: {description}\n\nToken Transfers (if any):\n{tokenTransfers}\n\n⚠️ IMPORTANT INSTRUCTIONS:\n1. If token transfers are detected, create journal entries for the TOKEN AMOUNTS, not just gas fees\n2. The main business transaction is the token transfer (e.g., 1000 USDT), not the ETH gas fees\n3. For outgoing token payments, typically:\n   - Debit: Expense account (based on user description)\n   - Credit: Digital Asset account for the specific token\n4. Create separate entries for gas fees only if significant\n5. Use the actual token amounts and symbols from the token transfer data\n\nPlease provide:\n1. Appropriate account classifications (Assets, Liabilities, Equity, Revenue, Expenses)\n2. Debit and credit entries following double-entry bookkeeping\n3. Amounts in the correct currency (token symbol for token transfers, ETH for gas)\n4. A clear narrative explaining the transaction\n5. Confidence level (0-1) for your analysis\n\nConsider the following IFRS guidelines:\n- IAS 38 for intangible assets (if applicable)\n- IFRS 9 for financial instruments\n- IAS 2 for inventory (if trading)\n- Revenue recognition principles\n\nReturn your response as a JSON array of journal entries with this structure:\n[\n  {\n    \"accountDebit\": \"Account Name\",\n    \"accountCredit\": \"Account Name\",\n    \"amount\": \"numeric_value\",\n    \"currency\": \"currency_code\",\n    \"narrative\": \"Description of the entry\",\n    \"confidence\": 0.95\n  }\n]",
+  
+  "accountMappings": {
+    "cryptoAssets": {
+      "bitcoin": "Digital Assets - Bitcoin",
+      "ethereum": "Digital Assets - Ethereum", 
+      "usdc": "Digital Assets - USDC",
+      "usdt": "Digital Assets - USDT",
+      "default": "Digital Assets - Other"
+    },
+    "expenses": {
+      "gas": "Transaction Fees Expense",
+      "mining": "Mining Expenses",
+      "trading": "Trading Expenses"
+    },
+    "revenue": {
+      "trading": "Trading Revenue",
+      "staking": "Staking Revenue",
+      "mining": "Mining Revenue"
+    },
+    "liabilities": {
+      "payable": "Accounts Payable - Crypto",
+      "loan": "Crypto Loans Payable"
+    }
+  },
+  
+  "transactionTypes": {
+    "purchase": {
+      "description": "Acquisition of cryptocurrency",
+      "commonEntries": [
+        {
+          "debit": "Digital Assets",
+          "credit": "Cash/Bank Account",
+          "narrative": "Purchase of cryptocurrency"
+        }
+      ]
+    },
+    "sale": {
+      "description": "Disposal of cryptocurrency",
+      "commonEntries": [
+        {
+          "debit": "Cash/Bank Account",
+          "credit": "Digital Assets",
+          "narrative": "Sale of cryptocurrency"
+        },
+        {
+          "debit": "Realized Gain/Loss",
+          "credit": "Digital Assets",
+          "narrative": "Realized gain/loss on crypto sale"
+        }
+      ]
+    },
+    "transfer": {
+      "description": "Transfer between wallets",
+      "commonEntries": [
+        {
+          "debit": "Transaction Fees Expense",
+          "credit": "Digital Assets",
+          "narrative": "Gas fees for wallet transfer"
+        }
+      ]
+    },
+    "staking": {
+      "description": "Staking rewards",
+      "commonEntries": [
+        {
+          "debit": "Digital Assets",
+          "credit": "Staking Revenue",
+          "narrative": "Staking rewards received"
+        }
+      ]
+    },
+    "defi": {
+      "description": "DeFi protocol interaction",
+      "commonEntries": [
+        {
+          "debit": "DeFi Protocol Assets",
+          "credit": "Digital Assets",
+          "narrative": "DeFi protocol deposit"
+        }
+      ]
+    }
+  },
+  
+  "validationRules": {
+    "balanceCheck": "Total debits must equal total credits",
+    "accountFormat": "Account names should follow standard chart of accounts",
+    "amountPrecision": "Amounts should have appropriate decimal precision",
+    "narrativeRequired": "Each entry must have a clear narrative",
+    "confidenceRange": "Confidence must be between 0 and 1"
+  }
+} 
