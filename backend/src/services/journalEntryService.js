@@ -87,37 +87,48 @@ class JournalEntryService {
       const enhancedEntries = await this.enhanceEntriesWithUSDValues(entries);
 
       // Prepare journal entry records - now with USD values in dedicated columns
-      const journalEntryRecords = enhancedEntries.map(entry => ({
-        user_id: userId,
-        transaction_id: finalTransactionId,
-        account_debit: entry.accountDebit || entry.account_debit,
-        account_credit: entry.accountCredit || entry.account_credit,
-        amount: Math.abs(parseFloat(entry.amount)), // Ensure positive amount
-        currency: entry.currency || 'USD',
-        // **NEW: Populate dedicated USD columns**
-        usd_value: entry.usdValue || null,
-        usd_rate: entry.ftsoPrice || entry.exchangeRate || null,
-        usd_source: entry.ftsoSource || entry.priceSource || null,
-        usd_timestamp: entry.ftsoTimestamp || (entry.usdValue ? new Date().toISOString() : null),
-        // Enhanced narrative with USD value if available
-        narrative: entry.enhancedNarrative || entry.narrative || entry.description || 'AI-generated entry',
-        entry_date: entry.entryDate || entry.entry_date || new Date().toISOString().split('T')[0],
-        ai_confidence: entry.confidence || entry.ai_confidence || (source === 'ai' ? 0.8 : null),
-        is_reviewed: false,
-        source: source === 'ai' ? 'ai_chat' : source,
-        // Keep some USD info in metadata for backward compatibility
-        metadata: JSON.stringify({
-          ...metadata,
-          originalNarrative: entry.narrative || entry.description,
-          ftsoEnhanced: !!entry.ftsoEnhanced,
-          // Keep legacy fields for compatibility
-          usdValue: entry.usdValue || null,
-          usdValueFormatted: entry.usdValueFormatted || null
-        }),
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        transaction_date: transactionDate,
-      }));
+      const journalEntryRecords = enhancedEntries.map(entry => {
+        // Preserve original business narrative (don't overwrite with FTSO data)
+        const originalNarrative = entry.narrative || entry.description;
+        
+        return {
+          user_id: userId,
+          transaction_id: finalTransactionId,
+          account_debit: entry.accountDebit || entry.account_debit,
+          account_credit: entry.accountCredit || entry.account_credit,
+          amount: Math.abs(parseFloat(entry.amount)), // Ensure positive amount
+          currency: entry.currency || 'USD',
+          // **UPDATED: Keep original business narrative in narrative field**
+          narrative: originalNarrative, // Keep business description here
+          entry_date: entry.entryDate || entry.entry_date || new Date().toISOString().split('T')[0],
+          transaction_date: entry.transactionDate || entry.transaction_date || null,
+          ai_confidence: entry.confidence || entry.ai_confidence || null,
+          is_reviewed: entry.isReviewed || entry.is_reviewed || false,
+          // **NEW: Populate dedicated USD columns**
+          usd_value: entry.usdValue || null,
+          usd_rate: entry.ftsoPrice || entry.exchangeRate || null,
+          usd_source: entry.ftsoSource || entry.priceSource || null,
+          usd_timestamp: entry.ftsoTimestamp || (entry.usdValue ? new Date().toISOString() : null),
+          // **UPDATED: Store FTSO technical data in metadata instead of narrative**
+          metadata: {
+            ...metadata,
+            originalEntry: {
+              accountDebit: entry.accountDebit || entry.account_debit,
+              accountCredit: entry.accountCredit || entry.account_credit,
+              amount: entry.amount,
+              currency: entry.currency,
+              narrative: originalNarrative
+            },
+            ftsoEnhancement: entry.usdValue ? {
+              usdValue: entry.usdValue,
+              exchangeRate: entry.ftsoPrice || entry.exchangeRate,
+              source: entry.ftsoSource || entry.priceSource,
+              timestamp: entry.ftsoTimestamp,
+              priceInfo: entry.usdValue ? `${entry.amount} ${entry.currency} (${entry.usdValue.toFixed(2)} USD at $${(entry.ftsoPrice || entry.exchangeRate)?.toFixed(4)}/${entry.currency} via ${entry.ftsoSource || entry.priceSource})` : null
+            } : null
+          }
+        };
+      });
 
       // Save to database
       const { data: savedEntries, error } = await this.supabase

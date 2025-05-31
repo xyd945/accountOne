@@ -39,11 +39,16 @@ interface JournalEntry {
   amount: number
   currency: string
   entry_date: string
+  transaction_date?: string
   narrative: string | null
   ai_confidence: number | null
   is_reviewed: boolean
   created_at: string
   updated_at: string
+  usd_value?: number
+  usd_rate?: number
+  usd_source?: string
+  usd_timestamp?: string
   transactions?: {
     user_id: string
     txid: string
@@ -243,13 +248,13 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
+    <div className="min-h-screen bg-gray-50 flex flex-col h-screen overflow-hidden">
       {/* Top Navigation */}
-      <nav className="bg-white shadow-sm border-b">
+      <nav className="bg-white shadow-sm border-b flex-shrink-0">
         <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex items-center">
-              <h1 className="text-xl font-semibold text-gray-900">AI Bookkeeping</h1>
+              <h1 className="text-xl font-semibold text-gray-900">AccountingOne</h1>
               {aiHealth && (
                 <div className="ml-4 flex items-center space-x-2">
                   <div className={`w-2 h-2 rounded-full ${aiHealth.overall ? 'bg-green-500' : 'bg-red-500'}`}></div>
@@ -279,11 +284,12 @@ export default function DashboardPage() {
         </div>
       </nav>
 
-      {/* Main Content */}
-      <div className="flex-1 flex">
+      {/* Main Content - Split Layout */}
+      <div className="flex-1 flex overflow-hidden">
         {/* Left Side - Chat Interface */}
         <div className="w-1/2 bg-white border-r border-gray-200 flex flex-col">
-          <div className="p-4 border-b border-gray-200">
+          {/* Chat Header - Fixed */}
+          <div className="p-4 border-b border-gray-200 flex-shrink-0">
             <h2 className="text-lg font-semibold text-gray-900 flex items-center">
               <CpuChipIcon className="h-5 w-5 mr-2 text-blue-600" />
               AI Assistant
@@ -291,7 +297,7 @@ export default function DashboardPage() {
             <p className="text-sm text-gray-600">Powered by Gemini AI • Ask about transactions, journal entries, or accounting</p>
           </div>
 
-          {/* Messages */}
+          {/* Chat Messages - Scrollable */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map((message) => (
               <div key={message.id} className="space-y-2">
@@ -392,8 +398,8 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* Message Input */}
-          <div className="p-4 border-t border-gray-200">
+          {/* Chat Input - Fixed at Bottom */}
+          <div className="p-4 border-t border-gray-200 flex-shrink-0 bg-white">
             <div className="flex space-x-2">
               <textarea
                 value={inputMessage}
@@ -419,7 +425,8 @@ export default function DashboardPage() {
 
         {/* Right Side - Journal Entries */}
         <div className="w-1/2 bg-gray-50 flex flex-col">
-          <div className="p-4 bg-white border-b border-gray-200">
+          {/* Journal Header - Fixed */}
+          <div className="p-4 bg-white border-b border-gray-200 flex-shrink-0">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <DocumentTextIcon className="h-5 w-5 mr-2 text-green-600" />
@@ -444,6 +451,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Journal Entries - Scrollable */}
           <div className="flex-1 overflow-y-auto p-4">
             {loadingEntries ? (
               <div className="flex items-center justify-center h-32">
@@ -474,26 +482,49 @@ export default function DashboardPage() {
               <div className="space-y-4">
                 {journalEntries.map((entry) => (
                   <div key={entry.id} className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
-                    <div className="flex items-start justify-between mb-2">
-                      <h3 className="font-medium text-gray-900">
-                        {entry.narrative || entry.transactions?.description || 'Journal Entry'}
-                      </h3>
-                      <span className="text-sm text-gray-500">{entry.entry_date}</span>
+                    {/* Top: Transaction Date only */}
+                    <div className="flex items-start justify-end mb-3">
+                      <span className="text-sm text-gray-500">
+                        {entry.transaction_date || entry.entry_date}
+                      </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    
+                    {/* Middle: Debit and Credit with Crypto Amounts */}
+                    <div className="grid grid-cols-2 gap-4 text-sm mb-3">
                       <div>
-                        <p className="text-gray-600">Debit</p>
+                        <p className="text-gray-600 text-xs mb-1">Debit</p>
                         <p className="font-medium text-red-600">{entry.account_debit}</p>
+                        <p className="text-sm text-gray-800 mt-1">{entry.amount.toFixed(2)} {entry.currency}</p>
                       </div>
                       <div>
-                        <p className="text-gray-600">Credit</p>
+                        <p className="text-gray-600 text-xs mb-1">Credit</p>
                         <p className="font-medium text-green-600">{entry.account_credit}</p>
+                        <p className="text-sm text-gray-800 mt-1">{entry.amount.toFixed(2)} {entry.currency}</p>
                       </div>
                     </div>
-                    <div className="mt-3 pt-3 border-t border-gray-100">
-                      <div className="flex justify-between items-center">
+                    
+                    {/* Bottom: Badges and Total Amount with USD */}
+                    <div className="pt-3 border-t border-gray-100">
+                      {/* FTSO Price Information */}
+                      {entry.usd_value && entry.usd_rate && entry.usd_source && (
+                        <div className="mb-2">
+                          <p className="text-xs text-gray-500">
+                            {entry.amount.toFixed(2)} {entry.currency} ({entry.usd_value.toFixed(2)} USD at ${entry.usd_rate.toFixed(4)}/{entry.currency} via {entry.usd_source})
+                          </p>
+                        </div>
+                      )}
+                      
+                      {/* Actual Business Narrative/Description */}
+                      {entry.narrative && !entry.narrative.includes('USD at $') && (
+                        <div className="mb-3">
+                          <p className="text-xs text-gray-600 font-medium">
+                            {entry.narrative}
+                          </p>
+                        </div>
+                      )}
+                      
+                      <div className="flex justify-between items-end">
                         <div className="flex items-center space-x-2">
-                          <span className="text-sm text-gray-600">Amount</span>
                           {entry.ai_confidence && (
                             <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
                               AI: {Math.round(entry.ai_confidence * 100)}%
@@ -505,9 +536,16 @@ export default function DashboardPage() {
                             </span>
                           )}
                         </div>
-                        <span className="font-semibold text-lg">
-                          {entry.amount.toLocaleString()} {entry.currency}
-                        </span>
+                        <div className="text-right">
+                          <div className="font-semibold text-lg">
+                            {entry.amount.toFixed(2)} {entry.currency}
+                          </div>
+                          {entry.usd_value && (
+                            <div className="text-sm text-gray-600">
+                              ${entry.usd_value.toFixed(2)} USD
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -519,4 +557,4 @@ export default function DashboardPage() {
       </div>
     </div>
   )
-} 
+}

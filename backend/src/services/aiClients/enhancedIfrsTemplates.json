@@ -22,7 +22,7 @@
           "debit": "Transaction Fees",
           "credit": "Digital Assets - C2FLR",
           "currency": "C2FLR"
-        },
+    },
         "ethereum": {
           "debit": "Transaction Fees", 
           "credit": "Digital Assets - Ethereum",
@@ -95,7 +95,7 @@
           "credit": "Digital Assets - Ethereum",
           "currency": "ETH"
         }
-      }
+        }
     },
     "nft": {
       "description": "Non-fungible token transactions",
