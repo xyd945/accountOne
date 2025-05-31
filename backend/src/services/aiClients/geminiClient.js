@@ -2069,10 +2069,32 @@ Revenue:
       return 'No token transfers detected';
     }
 
-    return tokenTransfers.map(transfer => {
-      const amount = parseFloat(transfer.value) / Math.pow(10, transfer.token?.decimals || 18);
-      return `• ${amount} ${transfer.token?.symbol || 'UNKNOWN'} (${transfer.token?.name || 'Unknown Token'}) from ${transfer.from} to ${transfer.to}`;
-    }).join('\n');
+    // Format with more explicit instructions for the AI
+    const formattedTransfers = tokenTransfers.map(transfer => {
+      // Fix: Use total.value from v2 API response, not transfer.value
+      const rawValue = transfer.total?.value || transfer.value || '0';
+      const decimals = parseInt(transfer.token?.decimals || 18);
+      const amount = parseFloat(rawValue) / Math.pow(10, decimals);
+      
+      const symbol = transfer.token?.symbol || 'UNKNOWN';
+      const name = transfer.token?.name || 'Unknown Token';
+      const from = transfer.from?.hash || transfer.from;
+      const to = transfer.to?.hash || transfer.to;
+      
+      return `TOKEN TRANSFER: ${amount} ${symbol} (${name})
+  - Amount: ${amount} (USE THIS EXACT NUMBER)
+  - Symbol: ${symbol} (USE THIS AS CURRENCY)
+  - From: ${from}
+  - To: ${to}
+  - Contract: ${transfer.token?.address || 'Unknown'}`;
+    }).join('\n\n');
+
+    return `🔥 IMPORTANT TOKEN TRANSFERS DETECTED:
+${formattedTransfers}
+
+⚠️ CRITICAL: The above amounts are already converted to proper decimals. 
+Use the EXACT amounts shown above in your journal entries. 
+DO NOT convert or calculate - use the numbers directly.`;
   }
 
   parseJournalEntries(responseText) {
@@ -2129,17 +2151,56 @@ Revenue:
       if (entries.length === 0) {
         logger.info('JSON parsing failed, attempting manual extraction');
         
-        // Extract amount and currency from original response text
-        const amountMatch = responseText.match(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*(USDC|ETH|BTC|USD|USDT|DAI)/i);
-        const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
-        const currency = amountMatch ? amountMatch[2].toUpperCase() : 'USD';
+        // Enhanced regex patterns to find amounts and currencies
+        const patterns = [
+          // Look for "Amount: X (USE THIS EXACT NUMBER)" pattern
+          /Amount:\s*(\d+(?:\.\d+)?)\s*\(USE THIS EXACT NUMBER\)/i,
+          // Look for "TOKEN TRANSFER: X SYMBOL" pattern  
+          /TOKEN TRANSFER:\s*(\d+(?:\.\d+)?)\s*(XYD|USDC|ETH|BTC|USD|USDT|DAI|C2FLR|FLARE)/i,
+          // Standard amount currency pattern
+          /(\d+(?:,\d{3})*(?:\.\d+)?)\s*(XYD|USDC|ETH|BTC|USD|USDT|DAI|C2FLR|FLARE)/i
+        ];
+        
+        let amount = 0;
+        let currency = 'USD';
+        
+        // Try each pattern until we find a match
+        for (const pattern of patterns) {
+          const match = responseText.match(pattern);
+          if (match) {
+            amount = parseFloat(match[1].replace(/,/g, ''));
+            currency = match[2] ? match[2].toUpperCase() : 'USD';
+            logger.info('Found amount using pattern', { pattern: pattern.source, amount, currency });
+            break;
+          }
+        }
+        
+        // If still no amount found, look for any number in the response
+        if (amount === 0) {
+          // Look for any token symbol mentioned and grab the nearest number
+          const symbolMatch = responseText.match(/(XYD|USDC|ETH|BTC|USDT|DAI|C2FLR)/i);
+          if (symbolMatch) {
+            currency = symbolMatch[1].toUpperCase();
+            // Look for numbers near the symbol
+            const numberPattern = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${currency}|${currency}\\s*(\\d+(?:\\.\\d+)?)`, 'i');
+            const numberMatch = responseText.match(numberPattern);
+            if (numberMatch) {
+              amount = parseFloat(numberMatch[1] || numberMatch[2]);
+              logger.info('Found amount near symbol', { currency, amount });
+            }
+          }
+        }
         
         // Look for account mentions in the text
         let debitAccount = 'Digital Assets - Other';
-        let creditAccount = 'Share Capital';
+        let creditAccount = 'Accounts Payable'; // Default for refunds
         
-        // Check for specific currency mentions
-        if (currency === 'USDC') {
+        // Check for specific currency mentions - updated for Coston2
+        if (currency === 'XYD') {
+          debitAccount = 'Digital Assets - Other'; // XYD goes to "Other" account
+        } else if (currency === 'C2FLR' || currency === 'FLARE') {
+          debitAccount = 'Digital Assets - C2FLR';
+        } else if (currency === 'USDC') {
           debitAccount = 'Digital Assets - USDC';
         } else if (currency === 'ETH') {
           debitAccount = 'Digital Assets - Ethereum';
@@ -2149,11 +2210,17 @@ Revenue:
           debitAccount = 'Digital Assets - USDT';
         }
         
-        // Check for investment/capital keywords
-        if (responseText.toLowerCase().includes('invest') || 
+        // Determine credit account based on context
+        if (responseText.toLowerCase().includes('refund')) {
+          creditAccount = 'Accounts Payable';
+        } else if (responseText.toLowerCase().includes('invest') || 
             responseText.toLowerCase().includes('capital') ||
             responseText.toLowerCase().includes('equity')) {
           creditAccount = 'Share Capital';
+        } else if (responseText.toLowerCase().includes('revenue') ||
+                   responseText.toLowerCase().includes('income') ||
+                   responseText.toLowerCase().includes('payment')) {
+          creditAccount = 'Trading Revenue';
         }
         
         if (amount > 0) {
@@ -2162,11 +2229,16 @@ Revenue:
             accountCredit: creditAccount,
             amount: amount,
             currency: currency,
-            narrative: `Manual extraction: ${amount} ${currency} transaction`,
+            narrative: `Manual extraction: Received ${amount} ${currency} as refund`,
             confidence: 0.7,
             ifrsReference: 'IAS 32',
           }];
           logger.info('Successfully created manual entry', { amount, currency, debitAccount, creditAccount });
+        } else {
+          logger.warn('Manual extraction failed - no valid amount found', { 
+            responseText: responseText.substring(0, 200),
+            patterns: patterns.map(p => p.source)
+          });
         }
       }
 
