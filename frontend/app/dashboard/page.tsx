@@ -39,11 +39,16 @@ interface JournalEntry {
   amount: number
   currency: string
   entry_date: string
+  transaction_date?: string
   narrative: string | null
   ai_confidence: number | null
   is_reviewed: boolean
   created_at: string
   updated_at: string
+  usd_value?: number
+  usd_rate?: number
+  usd_source?: string
+  usd_timestamp?: string
   transactions?: {
     user_id: string
     txid: string
@@ -474,26 +479,49 @@ export default function DashboardPage() {
               <div className="space-y-4">
                 {journalEntries.map((entry) => (
                   <div key={entry.id} className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
-                    <div className="flex items-start justify-between mb-2">
-                      <h3 className="font-medium text-gray-900">
-                        {entry.narrative || entry.transactions?.description || 'Journal Entry'}
-                      </h3>
-                      <span className="text-sm text-gray-500">{entry.entry_date}</span>
+                    {/* Top: Transaction Date only */}
+                    <div className="flex items-start justify-end mb-3">
+                      <span className="text-sm text-gray-500">
+                        {entry.transaction_date || entry.entry_date}
+                      </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    
+                    {/* Middle: Debit and Credit with Crypto Amounts */}
+                    <div className="grid grid-cols-2 gap-4 text-sm mb-3">
                       <div>
-                        <p className="text-gray-600">Debit</p>
+                        <p className="text-gray-600 text-xs mb-1">Debit</p>
                         <p className="font-medium text-red-600">{entry.account_debit}</p>
+                        <p className="text-sm text-gray-800 mt-1">{entry.amount.toFixed(2)} {entry.currency}</p>
                       </div>
                       <div>
-                        <p className="text-gray-600">Credit</p>
+                        <p className="text-gray-600 text-xs mb-1">Credit</p>
                         <p className="font-medium text-green-600">{entry.account_credit}</p>
+                        <p className="text-sm text-gray-800 mt-1">{entry.amount.toFixed(2)} {entry.currency}</p>
                       </div>
                     </div>
-                    <div className="mt-3 pt-3 border-t border-gray-100">
-                      <div className="flex justify-between items-center">
+                    
+                    {/* Bottom: Badges and Total Amount with USD */}
+                    <div className="pt-3 border-t border-gray-100">
+                      {/* FTSO Price Information */}
+                      {entry.usd_value && entry.usd_rate && entry.usd_source && (
+                        <div className="mb-2">
+                          <p className="text-xs text-gray-500">
+                            {entry.amount.toFixed(2)} {entry.currency} ({entry.usd_value.toFixed(2)} USD at ${entry.usd_rate.toFixed(4)}/{entry.currency} via {entry.usd_source})
+                          </p>
+                        </div>
+                      )}
+                      
+                      {/* Actual Business Narrative/Description */}
+                      {entry.narrative && !entry.narrative.includes('USD at $') && (
+                        <div className="mb-3">
+                          <p className="text-xs text-gray-600 font-medium">
+                            {entry.narrative}
+                          </p>
+                        </div>
+                      )}
+                      
+                      <div className="flex justify-between items-end">
                         <div className="flex items-center space-x-2">
-                          <span className="text-sm text-gray-600">Amount</span>
                           {entry.ai_confidence && (
                             <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
                               AI: {Math.round(entry.ai_confidence * 100)}%
@@ -505,9 +533,16 @@ export default function DashboardPage() {
                             </span>
                           )}
                         </div>
-                        <span className="font-semibold text-lg">
-                          {entry.amount.toLocaleString()} {entry.currency}
-                        </span>
+                        <div className="text-right">
+                          <div className="font-semibold text-lg">
+                            {entry.amount.toFixed(2)} {entry.currency}
+                          </div>
+                          {entry.usd_value && (
+                            <div className="text-sm text-gray-600">
+                              ${entry.usd_value.toFixed(2)} USD
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -519,4 +554,4 @@ export default function DashboardPage() {
       </div>
     </div>
   )
-} 
+}
