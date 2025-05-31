@@ -274,7 +274,7 @@ class BlockscoutClient {
     const fromAddress = tx.from?.toLowerCase();
     const toAddress = tx.to?.toLowerCase();
     const input = tx.input || '';
-    const value = parseFloat(tx.value || tx.actualAmount || 0);
+    const value = parseFloat(tx.actualAmount || tx.value || 0);
 
     // Known contract patterns and addresses for categorization
     const contractPatterns = {
@@ -527,11 +527,16 @@ class BlockscoutClient {
   }
 
   normalizeTransactionData(txData) {
+    // Convert Wei to ETH for regular transactions (similar to token transfers)
+    const rawValue = txData.value || '0';
+    const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to ETH
+
     return {
       hash: txData.hash,
       from: txData.from,
       to: txData.to,
-      value: txData.value,
+      value: rawValue, // Keep raw Wei value for reference
+      actualAmount: actualValue, // Converted ETH value for calculations
       gasUsed: txData.gasUsed,
       gasPrice: txData.gasPrice,
       blockNumber: txData.blockNumber,
@@ -571,11 +576,16 @@ class BlockscoutClient {
    * Normalize internal transactions
    */
   normalizeInternalTransaction(tx) {
+    // Convert Wei to ETH for internal transactions
+    const rawValue = tx.value || '0';
+    const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to ETH
+
     return {
       hash: tx.hash,
       from: tx.from,
       to: tx.to,
-      value: tx.value,
+      value: rawValue, // Keep raw Wei value for reference
+      actualAmount: actualValue, // Converted ETH value for calculations
       blockNumber: tx.blockNumber,
       timestamp: new Date(parseInt(tx.timeStamp) * 1000),
       type: tx.type || 'call',

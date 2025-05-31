@@ -193,9 +193,51 @@ router.post('/chat',
             entriesCount: response.journalEntries.length,
           });
 
-          // Extract transaction date from the first entry if available
-          const firstEntry = response.journalEntries[0];
-          const extractedTransactionDate = firstEntry.transactionDate || null;
+          // Flatten nested journal entries structure if needed
+          let flattenedEntries = [];
+          
+          for (const item of response.journalEntries) {
+            if (item.entries && Array.isArray(item.entries)) {
+              // This is a nested structure from bulk analysis
+              for (const entry of item.entries) {
+                flattenedEntries.push({
+                  ...entry,
+                  // Preserve transaction context in metadata
+                  metadata: {
+                    ...entry.metadata,
+                    originalTransactionHash: item.transactionHash,
+                    originalCategory: item.category,
+                  }
+                });
+              }
+            } else if (item.accountDebit || item.accountCredit) {
+              // This is already a flat entry structure
+              flattenedEntries.push(item);
+            } else {
+              // Unknown structure, log and include as-is
+              logger.warn('Unknown journal entry structure', { 
+                userId, 
+                entryStructure: Object.keys(item) 
+              });
+              flattenedEntries.push(item);
+            }
+          }
+
+          logger.info('Flattened journal entries for saving', {
+            userId,
+            originalCount: response.journalEntries.length,
+            flattenedCount: flattenedEntries.length,
+            entryPreview: flattenedEntries.slice(0, 2).map(e => ({
+              debit: e.accountDebit,
+              credit: e.accountCredit,
+              amount: e.amount,
+              currency: e.currency,
+            })),
+          });
+
+          // Extract transaction date from the first flattened entry if available
+          const firstEntry = flattenedEntries[0];
+          const extractedTransactionDate = firstEntry?.transactionDate || null;
           
           if (extractedTransactionDate) {
             logger.info('Using extracted transaction date for journal entries', {
@@ -205,7 +247,7 @@ router.post('/chat',
           }
 
           const savedEntries = await journalEntryService.saveJournalEntries({
-            entries: response.journalEntries,
+            entries: flattenedEntries,
             userId,
             source: 'ai_chat',
             metadata: {
@@ -213,7 +255,8 @@ router.post('/chat',
               aiResponse: response.response.substring(0, 500), // First 500 chars
               timestamp: new Date().toISOString(),
               transactionDate: extractedTransactionDate, // Pass the extracted date
-              extractedFromMessage: !!extractedTransactionDate
+              extractedFromMessage: !!extractedTransactionDate,
+              hadNestedStructure: response.journalEntries.some(item => item.entries && Array.isArray(item.entries)),
             },
           });
 

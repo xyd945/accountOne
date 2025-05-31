@@ -252,7 +252,7 @@ class GeminiClient {
     // Minimum value filtering (to exclude dust transactions)
     if (options.minValue) {
       filtered = filtered.filter(tx => {
-        const value = parseFloat(tx.value || tx.actualAmount || 0);
+        const value = parseFloat(tx.actualAmount || tx.value || 0);
         return value >= options.minValue;
       });
     }
@@ -386,7 +386,7 @@ class GeminiClient {
       return `${index + 1}. Hash: ${tx.hash}
    From: ${tx.from}
    To: ${tx.to}
-   Value: ${tx.value || tx.actualAmount || 0} ${tx.tokenSymbol || 'ETH'}
+   Value: ${tx.actualAmount || tx.value || 0} ${tx.tokenSymbol || 'ETH'}
    Category: ${tx.category}
    Direction: ${tx.direction}
    Timestamp: ${tx.timestamp}
@@ -425,7 +425,7 @@ IFRS Notes: ${template.ifrsNotes}`;
 
     transactions.forEach(tx => {
       // Calculate total value
-      const value = parseFloat(tx.value || tx.actualAmount || 0);
+      const value = parseFloat(tx.actualAmount || tx.value || 0);
       summary.totalValue += value;
 
       // Track tokens
@@ -477,7 +477,7 @@ IFRS Notes: ${template.ifrsNotes}`;
       hash: tx.hash,
       from: tx.from,
       to: tx.to,
-      value: tx.value || tx.actualAmount || 0,
+      value: tx.actualAmount || tx.value || 0, // FIXED: prioritize actualAmount (ETH) over value (Wei)
       currency: tx.tokenSymbol || 'ETH',
       category: tx.category,
       direction: tx.direction,
@@ -575,33 +575,95 @@ IFRS Notes: ${template.ifrsNotes}`;
    * Save bulk journal entries to database
    */
   async saveBulkJournalEntries(journalEntries, userId, walletAddress) {
-    const savedEntries = [];
-
     try {
+      logger.info('Starting bulk journal entries save', {
+        userId,
+        walletAddress,
+        entryGroupsCount: journalEntries.length,
+      });
+
+      // Flatten the nested structure into individual entries
+      const flattenedEntries = [];
+      
       for (const entryGroup of journalEntries) {
         for (const entry of entryGroup.entries) {
-          const savedEntry = await journalEntryService.saveJournalEntry({
-            user_id: userId,
-            account_debit: entry.accountDebit,
-            account_credit: entry.accountCredit,
-            amount: parseFloat(entry.amount),
+          const amount = parseFloat(entry.amount);
+          
+          // Filter out invalid amounts to prevent database constraint violations
+          if (amount <= 0.00001 || amount >= 1000000 || isNaN(amount)) {
+            logger.warn('Skipping entry with invalid amount', {
+              amount: entry.amount,
+              currency: entry.currency,
+              debit: entry.accountDebit,
+              credit: entry.accountCredit,
+              transactionHash: entryGroup.transactionHash,
+              reason: amount <= 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+            });
+            continue; // Skip this entry
+          }
+          
+          // Add transaction context to each entry
+          flattenedEntries.push({
+            accountDebit: entry.accountDebit,
+            accountCredit: entry.accountCredit,
+            amount: amount, // Use the validated amount
             currency: entry.currency,
-            entry_date: new Date().toISOString().split('T')[0],
             narrative: `${entry.narrative} (Bulk analysis from ${walletAddress})`,
-            ai_confidence: entry.confidence || 0.8,
+            confidence: entry.confidence || 0.8,
+            entryType: entry.entryType || 'main',
+            // Add metadata about the source transaction
             metadata: {
               walletAddress,
               transactionHash: entryGroup.transactionHash,
               category: entryGroup.category,
               entryType: entry.entryType || 'main',
               bulkAnalysis: true,
+              requiresAccountCreation: entry.requiresAccountCreation || false,
+              accountCreationSuggestions: entry.accountCreationSuggestions || null,
             },
-            source: 'ai_bulk_analysis',
           });
-
-          savedEntries.push(savedEntry);
         }
       }
+
+      logger.info('Flattened journal entries for saving', {
+        userId,
+        totalEntries: flattenedEntries.length,
+        entryPreview: flattenedEntries.slice(0, 2).map(e => ({
+          debit: e.accountDebit,
+          credit: e.accountCredit,
+          amount: e.amount,
+          currency: e.currency,
+        })),
+      });
+
+      // Check if we have any valid entries after filtering
+      if (flattenedEntries.length === 0) {
+        logger.warn('No valid entries remaining after amount filtering', {
+          userId,
+          walletAddress,
+          originalEntryGroups: journalEntries.length,
+        });
+        return []; // Return empty array instead of failing
+      }
+
+      // Use the correct function name with proper structure
+      const savedEntries = await journalEntryService.saveJournalEntries({
+        entries: flattenedEntries,
+        userId: userId,
+        source: 'ai_bulk_analysis',
+        metadata: {
+          walletAddress,
+          bulkAnalysis: true,
+          analysisTimestamp: new Date().toISOString(),
+          totalTransactionGroups: journalEntries.length,
+        },
+      });
+
+      logger.info('Successfully saved bulk journal entries', {
+        userId,
+        walletAddress,
+        savedCount: savedEntries.length,
+      });
 
       return savedEntries;
 
@@ -621,16 +683,22 @@ IFRS Notes: ${template.ifrsNotes}`;
    * Generate comprehensive summary of bulk analysis
    */
   generateBulkAnalysisSummary(walletData, processedTransactions, journalEntries, processingResults) {
+    // Add defensive checks for all parameters
+    const safeWalletData = walletData || { summary: { categories: {} }, totalTransactions: 0 };
+    const safeProcessedTransactions = processedTransactions || [];
+    const safeJournalEntries = journalEntries || [];
+    const safeProcessingResults = processingResults || {};
+
     const summary = {
       walletAnalysis: {
-        totalTransactionsInWallet: walletData.totalTransactions,
-        totalTransactionsProcessed: processedTransactions.length,
-        totalJournalEntriesGenerated: journalEntries.length,
-        processingSuccessRate: this.calculateSuccessRate(processingResults),
+        totalTransactionsInWallet: safeWalletData.totalTransactions || 0,
+        totalTransactionsProcessed: safeProcessedTransactions.length,
+        totalJournalEntriesGenerated: safeJournalEntries.length,
+        processingSuccessRate: this.calculateSuccessRate(safeProcessingResults),
       },
-      categoryBreakdown: this.summarizeCategoryResults(processingResults),
-      recommendations: this.generateRecommendations(walletData, journalEntries, processingResults),
-      ifrsCompliance: this.assessIfrsCompliance(journalEntries),
+      categoryBreakdown: this.summarizeCategoryResults(safeProcessingResults),
+      recommendations: this.generateRecommendations(safeWalletData, safeJournalEntries, safeProcessingResults),
+      ifrsCompliance: this.assessIfrsCompliance(safeJournalEntries),
     };
 
     return summary;
@@ -640,8 +708,12 @@ IFRS Notes: ${template.ifrsNotes}`;
    * Calculate processing success rate
    */
   calculateSuccessRate(processingResults) {
+    if (!processingResults || typeof processingResults !== 'object') {
+      return 'N/A';
+    }
+    
     const total = Object.keys(processingResults).length;
-    const successful = Object.values(processingResults).filter(result => !result.error).length;
+    const successful = Object.values(processingResults).filter(result => result && !result.error).length;
     return total > 0 ? (successful / total * 100).toFixed(1) + '%' : 'N/A';
   }
 
@@ -651,13 +723,19 @@ IFRS Notes: ${template.ifrsNotes}`;
   summarizeCategoryResults(processingResults) {
     const summary = {};
 
+    if (!processingResults || typeof processingResults !== 'object') {
+      return summary;
+    }
+
     Object.entries(processingResults).forEach(([category, result]) => {
-      summary[category] = {
-        transactions: result.transactions || 0,
-        journalEntries: result.journalEntries?.length || 0,
-        success: !result.error,
-        error: result.error || null,
-      };
+      if (result && typeof result === 'object') {
+        summary[category] = {
+          transactions: result.transactions || 0,
+          journalEntries: result.journalEntries?.length || 0,
+          success: !result.error,
+          error: result.error || null,
+        };
+      }
     });
 
     return summary;
@@ -669,29 +747,61 @@ IFRS Notes: ${template.ifrsNotes}`;
   generateRecommendations(walletData, journalEntries, processingResults) {
     const recommendations = [];
 
-    // Check for high-volume categories
-    Object.entries(walletData.summary.categories).forEach(([category, count]) => {
-      if (count > 50) {
-        recommendations.push(`High activity in ${category} (${count} transactions) - consider setting up automated processing rules`);
-      }
-    });
+    // Check for high-volume categories with defensive checks
+    if (walletData?.summary?.categories && typeof walletData.summary.categories === 'object') {
+      Object.entries(walletData.summary.categories).forEach(([category, count]) => {
+        if (typeof count === 'number' && count > 50) {
+          recommendations.push(`High activity in ${category} (${count} transactions) - consider setting up automated processing rules`);
+        }
+      });
+    }
 
-    // Check for failed processing
-    Object.entries(processingResults).forEach(([category, result]) => {
-      if (result.error) {
-        recommendations.push(`Failed to process ${category} transactions - manual review required`);
-      }
-    });
+    // Check for failed processing with defensive checks
+    if (processingResults && typeof processingResults === 'object') {
+      Object.entries(processingResults).forEach(([category, result]) => {
+        if (result && result.error) {
+          recommendations.push(`Failed to process ${category} transactions - manual review required`);
+        }
+      });
+    }
 
-    // Check for missing account mappings
-    const missingAccounts = journalEntries
-      .flatMap(group => group.entries)
-      .filter(entry => entry.requiresAccountCreation)
-      .map(entry => entry.accountDebit || entry.accountCredit)
-      .filter((account, index, arr) => arr.indexOf(account) === index);
+    // Check for missing account mappings - handle different data structures
+    const missingAccounts = [];
+    if (journalEntries && Array.isArray(journalEntries)) {
+      try {
+        // Handle nested structure (bulk analysis)
+        if (journalEntries.length > 0 && journalEntries[0] && journalEntries[0].entries) {
+          const allEntries = journalEntries.flatMap(group => group.entries || []);
+          const missing = allEntries
+            .filter(entry => entry && entry.requiresAccountCreation)
+            .map(entry => entry.accountDebit || entry.accountCredit)
+            .filter((account, index, arr) => account && arr.indexOf(account) === index);
+          missingAccounts.push(...missing);
+        } 
+        // Handle flat structure (single transaction analysis)
+        else {
+          const missing = journalEntries
+            .filter(entry => entry && entry.requiresAccountCreation)
+            .map(entry => entry.accountDebit || entry.accountCredit)
+            .filter((account, index, arr) => account && arr.indexOf(account) === index);
+          missingAccounts.push(...missing);
+        }
+      } catch (error) {
+        logger.warn('Failed to process journal entries for recommendations', {
+          error: error.message,
+          journalEntriesLength: journalEntries.length,
+        });
+      }
+    }
 
     if (missingAccounts.length > 0) {
       recommendations.push(`Create missing accounts: ${missingAccounts.join(', ')}`);
+    }
+
+    // Add default recommendations if none found
+    if (recommendations.length === 0) {
+      recommendations.push('All transactions processed successfully');
+      recommendations.push('Review generated journal entries for accuracy');
     }
 
     return recommendations;
@@ -712,8 +822,26 @@ IFRS Notes: ${template.ifrsNotes}`;
     let totalConfidence = 0;
     let entryCount = 0;
 
-    journalEntries.forEach(group => {
-      group.entries.forEach(entry => {
+    if (!journalEntries || !Array.isArray(journalEntries)) {
+      compliance.issues.push('No journal entries provided for compliance assessment');
+      return compliance;
+    }
+
+    try {
+      // Handle different data structures
+      let allEntries = [];
+      
+      if (journalEntries.length > 0) {
+        // Check if it's nested structure (bulk analysis)
+        if (journalEntries[0] && journalEntries[0].entries) {
+          allEntries = journalEntries.flatMap(group => group.entries || []);
+        } else {
+          // Flat structure (single transaction analysis)
+          allEntries = journalEntries;
+        }
+      }
+
+      allEntries.forEach(entry => {
         // Check confidence
         if (entry.confidence) {
           totalConfidence += entry.confidence;
@@ -730,12 +858,19 @@ IFRS Notes: ${template.ifrsNotes}`;
           compliance.issues.push(`Unclear narrative: ${entry.narrative || 'N/A'}`);
         }
       });
-    });
 
-    compliance.confidenceScore = entryCount > 0 ? (totalConfidence / entryCount).toFixed(2) : 0;
+      compliance.confidenceScore = entryCount > 0 ? (totalConfidence / entryCount).toFixed(2) : 0;
 
-    if (compliance.issues.length === 0) {
-      compliance.issues.push('No significant compliance issues detected');
+      if (compliance.issues.length === 0) {
+        compliance.issues.push('No significant compliance issues detected');
+      }
+
+    } catch (error) {
+      logger.warn('Failed to assess IFRS compliance', {
+        error: error.message,
+        journalEntriesLength: journalEntries.length,
+      });
+      compliance.issues.push('Error during compliance assessment');
     }
 
     return compliance;
@@ -876,16 +1011,28 @@ IFRS Notes: ${template.ifrsNotes}`;
         if (analysis.journalEntries && analysis.journalEntries.length > 0) {
           response += `💰 **Sample Journal Entries:**\n\n`;
           
-          // Show first 3 entries
-          analysis.journalEntries.slice(0, 3).forEach((entryGroup, index) => {
-            response += `**${index + 1}. ${entryGroup.category?.toUpperCase() || 'TRANSACTION'}**\n`;
-            entryGroup.entries.forEach((entry, entryIndex) => {
-              response += `• Debit: ${entry.accountDebit} (${entry.amount} ${entry.currency})\n`;
-              response += `• Credit: ${entry.accountCredit}\n`;
-              response += `• Narrative: ${entry.narrative}\n`;
-              if (entryIndex < entryGroup.entries.length - 1) response += `\n`;
-            });
-            if (index < 2 && index < analysis.journalEntries.length - 1) response += `\n---\n\n`;
+          // Handle both flattened entries (from saved) and nested entry groups (from analysis)
+          const entriesToShow = analysis.journalEntries.slice(0, 3);
+          
+          entriesToShow.forEach((entryItem, index) => {
+            // Check if this is a nested entry group or flattened entry
+            if (entryItem.entries && Array.isArray(entryItem.entries)) {
+              // Nested entry group structure
+              response += `**${index + 1}. ${entryItem.category?.toUpperCase() || 'TRANSACTION'}**\n`;
+              entryItem.entries.forEach((entry, entryIndex) => {
+                response += `• Debit: ${entry.accountDebit} (${entry.amount} ${entry.currency})\n`;
+                response += `• Credit: ${entry.accountCredit}\n`;
+                response += `• Narrative: ${entry.narrative}\n`;
+                if (entryIndex < entryItem.entries.length - 1) response += `\n`;
+              });
+            } else {
+              // Flattened entry structure (from saved entries)
+              response += `**${index + 1}. JOURNAL ENTRY**\n`;
+              response += `• Debit: ${entryItem.accountDebit} (${entryItem.amount} ${entryItem.currency})\n`;
+              response += `• Credit: ${entryItem.accountCredit}\n`;
+              response += `• Narrative: ${entryItem.narrative}\n`;
+            }
+            if (index < 2 && index < entriesToShow.length - 1) response += `\n---\n\n`;
           });
 
           if (analysis.journalEntries.length > 3) {
@@ -1044,7 +1191,31 @@ IFRS Notes: ${template.ifrsNotes}`;
     ];
 
     const lowerMessage = message.toLowerCase();
-    return journalKeywords.some(keyword => lowerMessage.includes(keyword));
+    const hasJournalKeyword = journalKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Check for transaction hash (64 hex chars) - this is likely a journal entry request
+    const hasTransactionHash = /0x[a-fA-F0-9]{64}/.test(message);
+    
+    // Look for transaction-specific analysis keywords
+    const transactionAnalysisKeywords = [
+      'analyze this transaction',
+      'analyze this specific',
+      'transaction hash',
+      'analyze transaction',
+      'create journal entries',
+      'process transaction'
+    ];
+    
+    const hasTransactionAnalysisKeyword = transactionAnalysisKeywords.some(keyword => 
+      lowerMessage.includes(keyword)
+    );
+    
+    // If message has transaction hash AND analysis keywords, it's a journal entry request
+    if (hasTransactionHash && (hasTransactionAnalysisKeyword || lowerMessage.includes('journal'))) {
+      return true;
+    }
+    
+    return hasJournalKeyword;
   }
 
   /**
@@ -1061,7 +1232,6 @@ IFRS Notes: ${template.ifrsNotes}`;
       'bulk analyze',
       'process wallet',
       'transaction history',
-      'analyze 0x',
       'analyze the wallet',
       'analyze this wallet',
       'bulk process'
@@ -1070,8 +1240,14 @@ IFRS Notes: ${template.ifrsNotes}`;
     const lowerMessage = message.toLowerCase();
     const hasWalletKeyword = walletKeywords.some(keyword => lowerMessage.includes(keyword));
     
-    // Also check if message contains an Ethereum address (0x followed by 40 hex characters)
-    const hasEthAddress = /0x[a-fA-F0-9]{40}/.test(message);
+    // Check for transaction hash first (64 hex chars) - if found, this is NOT a wallet analysis
+    const hasTransactionHash = /0x[a-fA-F0-9]{64}/.test(message);
+    if (hasTransactionHash) {
+      return false; // This is a transaction analysis, not wallet analysis
+    }
+    
+    // Check if message contains an Ethereum address (0x followed by exactly 40 hex characters)
+    const hasEthAddress = /0x[a-fA-F0-9]{40}(?![a-fA-F0-9])/.test(message);
     
     return hasWalletKeyword || (hasEthAddress && (
       lowerMessage.includes('analyze') || 
@@ -1086,7 +1262,8 @@ IFRS Notes: ${template.ifrsNotes}`;
    * Extract wallet address from message
    */
   extractWalletAddress(message) {
-    const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
+    // Only match exactly 40 hex characters (not 64) to avoid matching transaction hashes
+    const addressMatch = message.match(/0x[a-fA-F0-9]{40}(?![a-fA-F0-9])/);
     return addressMatch ? addressMatch[0] : null;
   }
 
@@ -1647,25 +1824,47 @@ User message: ${message}`;
       // Format token transfers data
       const tokenTransfersText = this.formatTokenTransfers(blockchainData.tokenTransfers || []);
 
-      // Build the analysis prompt with chart of accounts
+      // Convert gas values to ETH for proper accounting
+      const gasUsed = blockchainData.gas_used || blockchainData.gasUsed || 0;
+      const gasPrice = blockchainData.gas_price || blockchainData.gasPrice || 0;
+      const gasFeeWei = parseFloat(gasUsed) * parseFloat(gasPrice);
+      const gasFeeETH = gasFeeWei / Math.pow(10, 18); // Convert Wei to ETH
+      
+      // Convert ETH value properly 
+      const ethValue = parseFloat(blockchainData.value || 0) / Math.pow(10, 18);
+
+      // Build the analysis prompt with chart of accounts and properly converted values
       const prompt = ifrsTemplates.transactionAnalysisPrompt
         .replace('{hash}', blockchainData.hash)
         .replace('{from}', blockchainData.from)
         .replace('{to}', blockchainData.to)
-        .replace('{value}', parseFloat(blockchainData.value) / Math.pow(10, 18))
-        .replace('{gasUsed}', blockchainData.gas_used || blockchainData.gasUsed)
-        .replace('{gasPrice}', blockchainData.gas_price || blockchainData.gasPrice)
+        .replace('{value}', ethValue.toFixed(8)) // ETH value with reasonable precision
+        .replace('{gasUsed}', gasUsed.toString())
+        .replace('{gasPrice}', (parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4) + ' Gwei') // Convert to Gwei for readability
         .replace('{timestamp}', blockchainData.timestamp)
         .replace('{status}', blockchainData.status)
         .replace('{description}', description || 'No description provided')
         .replace('{tokenTransfers}', tokenTransfersText)
         .replace('{chartOfAccounts}', chartOfAccounts);
 
+      // Add gas fee information to the prompt
+      const enhancedPrompt = prompt + `\n\nGAS FEE ANALYSIS:
+- Gas Used: ${gasUsed} units
+- Gas Price: ${(parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4)} Gwei
+- Total Gas Fee: ${gasFeeETH.toFixed(8)} ETH
+- Gas Fee USD Equivalent: Include if significant (>$1)
+
+IMPORTANT CONVERSION RULES:
+1. All amounts MUST be in reasonable accounting units (ETH, not Wei or Gwei)
+2. Gas fees should be recorded as separate journal entries only if > 0.0001 ETH
+3. For token transfers, use token amounts from tokenTransfers data
+4. Ensure all amounts are > 0 and < 1,000,000 for database compatibility`;
+
       const systemPrompt = ifrsTemplates.systemPrompt;
 
       const result = await this.model.generateContent([
         { text: systemPrompt },
-        { text: prompt },
+        { text: enhancedPrompt },
       ]);
 
       const response = await result.response;
@@ -1674,13 +1873,41 @@ User message: ${message}`;
       logger.info('Received AI analysis response', {
         hash: blockchainData.hash,
         responseLength: responseText.length,
+        ethValue,
+        gasFeeETH: gasFeeETH.toFixed(8),
       });
 
       // Parse the JSON response
       const journalEntries = this.parseJournalEntries(responseText);
 
+      // Validate and filter entries to prevent database constraint violations
+      const validEntries = journalEntries.filter(entry => {
+        const amount = parseFloat(entry.amount);
+        // Allow smaller amounts for gas fees (0.00001 ETH minimum) but still prevent tiny/invalid amounts
+        const isValid = amount >= 0.00001 && amount < 1000000 && !isNaN(amount); 
+        
+        if (!isValid) {
+          logger.warn('Filtering out entry with invalid amount', {
+            amount: entry.amount,
+            currency: entry.currency,
+            debit: entry.accountDebit,
+            credit: entry.accountCredit,
+            reason: amount < 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+          });
+        }
+        
+        return isValid;
+      });
+
       // Validate accounts against chart of accounts
-      const validatedEntries = await this.validateAndCorrectAccounts(journalEntries);
+      const validatedEntries = await this.validateAndCorrectAccounts(validEntries);
+
+      logger.info('Transaction analysis completed', {
+        hash: blockchainData.hash,
+        totalEntries: journalEntries.length,
+        validEntries: validEntries.length,
+        finalEntries: validatedEntries.length,
+      });
 
       return validatedEntries;
     } catch (error) {
