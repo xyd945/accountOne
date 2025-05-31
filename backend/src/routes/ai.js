@@ -91,6 +91,58 @@ router.post('/chat',
       // Add user context
       context.user = req.user;
 
+      // Check if this is a wallet analysis request (long-running operation)
+      const geminiClient = require('../services/aiClients/geminiClient');
+      const isWalletAnalysis = geminiClient.isWalletAnalysisRequest && 
+                               geminiClient.isWalletAnalysisRequest(message);
+
+      // Set extended timeout for wallet analysis (5 minutes)
+      if (isWalletAnalysis) {
+        req.setTimeout(300000); // 5 minutes
+        res.setTimeout(300000); // 5 minutes
+        
+        logger.info('Extended timeout set for wallet analysis', {
+          userId,
+          timeout: '5 minutes',
+        });
+
+        // Send immediate acknowledgment for wallet analysis
+        const walletAddress = geminiClient.extractWalletAddress && 
+                             geminiClient.extractWalletAddress(message);
+        if (walletAddress) {
+          // Send a "thinking" response immediately
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+          });
+          
+          // Send initial response
+          const initialResponse = {
+            success: true,
+            data: {
+              response: `🔍 **Starting Wallet Analysis**\n\n📍 **Address:** ${walletAddress}\n\n⏳ **Status:** Fetching transactions from blockchain...\n\nThis may take 1-2 minutes. Please wait while I:\n• Fetch all transactions\n• Categorize transaction types\n• Generate IFRS-compliant journal entries\n• Validate account mappings\n\n*Please keep this window open...*`,
+              thinking: `Starting comprehensive analysis of wallet ${walletAddress}. This involves blockchain API calls, AI processing, and account validation.`,
+              isProcessing: true,
+              walletAddress: walletAddress,
+              estimatedTime: '1-2 minutes',
+              suggestions: [
+                'Keep this window open while analysis completes',
+                'Analysis includes transaction categorization and journal entry generation',
+                'Results will update automatically when complete'
+              ],
+              journalEntries: [],
+            }
+          };
+          
+          res.write(JSON.stringify(initialResponse));
+          
+          logger.info('Sent initial wallet analysis response', {
+            userId,
+            walletAddress,
+          });
+        }
+      }
+
       // Get recent entries for context
       if (!context.recentEntries) {
         const { data: recentEntries } = await journalEntryService.supabase
@@ -114,14 +166,23 @@ router.post('/chat',
           message: message.substring(0, 100),
         });
         
-        return res.json({
+        const errorResponse = {
           success: false,
           error: 'AI service temporarily unavailable. Please try again in a moment.',
           data: {
             response: 'I apologize, but I\'m having trouble processing your request right now. Please try again in a moment.',
             journalEntries: [],
           }
-        });
+        };
+
+        if (isWalletAnalysis && walletAddress) {
+          // Send error update for wallet analysis
+          res.write('\n' + JSON.stringify(errorResponse));
+          res.end();
+        } else {
+          return res.json(errorResponse);
+        }
+        return;
       }
 
       // Check if the AI generated any journal entries and save them automatically
@@ -132,9 +193,51 @@ router.post('/chat',
             entriesCount: response.journalEntries.length,
           });
 
-          // Extract transaction date from the first entry if available
-          const firstEntry = response.journalEntries[0];
-          const extractedTransactionDate = firstEntry.transactionDate || null;
+          // Flatten nested journal entries structure if needed
+          let flattenedEntries = [];
+          
+          for (const item of response.journalEntries) {
+            if (item.entries && Array.isArray(item.entries)) {
+              // This is a nested structure from bulk analysis
+              for (const entry of item.entries) {
+                flattenedEntries.push({
+                  ...entry,
+                  // Preserve transaction context in metadata
+                  metadata: {
+                    ...entry.metadata,
+                    originalTransactionHash: item.transactionHash,
+                    originalCategory: item.category,
+                  }
+                });
+              }
+            } else if (item.accountDebit || item.accountCredit) {
+              // This is already a flat entry structure
+              flattenedEntries.push(item);
+            } else {
+              // Unknown structure, log and include as-is
+              logger.warn('Unknown journal entry structure', { 
+                userId, 
+                entryStructure: Object.keys(item) 
+              });
+              flattenedEntries.push(item);
+            }
+          }
+
+          logger.info('Flattened journal entries for saving', {
+            userId,
+            originalCount: response.journalEntries.length,
+            flattenedCount: flattenedEntries.length,
+            entryPreview: flattenedEntries.slice(0, 2).map(e => ({
+              debit: e.accountDebit,
+              credit: e.accountCredit,
+              amount: e.amount,
+              currency: e.currency,
+            })),
+          });
+
+          // Extract transaction date from the first flattened entry if available
+          const firstEntry = flattenedEntries[0];
+          const extractedTransactionDate = firstEntry?.transactionDate || null;
           
           if (extractedTransactionDate) {
             logger.info('Using extracted transaction date for journal entries', {
@@ -144,7 +247,7 @@ router.post('/chat',
           }
 
           const savedEntries = await journalEntryService.saveJournalEntries({
-            entries: response.journalEntries,
+            entries: flattenedEntries,
             userId,
             source: 'ai_chat',
             metadata: {
@@ -152,7 +255,8 @@ router.post('/chat',
               aiResponse: response.response.substring(0, 500), // First 500 chars
               timestamp: new Date().toISOString(),
               transactionDate: extractedTransactionDate, // Pass the extracted date
-              extractedFromMessage: !!extractedTransactionDate
+              extractedFromMessage: !!extractedTransactionDate,
+              hadNestedStructure: response.journalEntries.some(item => item.entries && Array.isArray(item.entries)),
             },
           });
 
@@ -176,10 +280,24 @@ router.post('/chat',
         }
       }
 
-      res.json({
+      const finalResponse = {
         success: true,
         data: response,
-      });
+      };
+
+      if (isWalletAnalysis && walletAddress) {
+        // Send final update for wallet analysis
+        res.write('\n' + JSON.stringify(finalResponse));
+        res.end();
+        
+        logger.info('Completed wallet analysis streaming response', {
+          userId,
+          walletAddress,
+          entriesGenerated: response.journalEntries?.length || 0,
+        });
+      } else {
+        res.json(finalResponse);
+      }
     } catch (error) {
       logger.error('AI chat request failed', {
         userId: req.user?.id,

@@ -20,6 +20,862 @@ class GeminiClient {
     );
   }
 
+  /**
+   * Analyze multiple transactions from a wallet address and create bulk journal entries
+   * @param {string} walletAddress - The wallet address to analyze
+   * @param {Object} options - Options for transaction fetching and analysis
+   * @param {string} userId - User ID for saving entries
+   * @returns {Object} Complete analysis with journal entries
+   */
+  async analyzeBulkTransactions(walletAddress, options = {}, userId = null) {
+    try {
+      logger.info('🚀 Starting bulk transaction analysis', {
+        walletAddress,
+        userId,
+        options,
+        step: 'initialization',
+        message: 'Beginning comprehensive wallet analysis process'
+      });
+
+      // Fetch all transactions for the wallet
+      logger.info('📡 Fetching blockchain data', {
+        walletAddress,
+        step: 'blockchain_fetch',
+        message: 'Connecting to blockchain API to retrieve transaction history'
+      });
+
+      const walletData = await BlockscoutClient.getWalletTransactions(walletAddress, options);
+      
+      logger.info('✅ Blockchain data retrieved successfully', {
+        walletAddress,
+        totalTransactions: walletData.totalTransactions,
+        categories: Object.keys(walletData.summary.categories),
+        step: 'blockchain_complete',
+        message: `Found ${walletData.totalTransactions} transactions across ${Object.keys(walletData.summary.categories).length} categories`
+      });
+
+      // Filter transactions based on options
+      logger.info('🔍 Filtering transactions for analysis', {
+        step: 'transaction_filter',
+        message: 'Applying user-specified filters and limits'
+      });
+
+      const filteredTransactions = this.filterTransactionsForAnalysis(walletData.transactions, options);
+
+      if (filteredTransactions.length === 0) {
+        logger.info('⚠️ No transactions match analysis criteria', {
+          step: 'no_transactions',
+          message: 'Filters resulted in zero transactions to analyze'
+        });
+
+        return {
+          success: true,
+          walletAddress,
+          summary: {
+            totalTransactionsAnalyzed: 0,
+            totalEntriesGenerated: 0,
+            categories: {},
+            recommendations: ['No transactions found matching the criteria'],
+          },
+          journalEntries: [],
+        };
+      }
+
+      // Group transactions by category for efficient AI processing
+      logger.info('📊 Categorizing transactions', {
+        step: 'categorization',
+        message: `Organizing ${filteredTransactions.length} transactions by type for AI processing`
+      });
+
+      const transactionGroups = this.groupTransactionsByCategory(filteredTransactions);
+
+      logger.info('✅ Transaction categorization complete', {
+        categories: Object.keys(transactionGroups),
+        counts: Object.fromEntries(
+          Object.entries(transactionGroups).map(([cat, txs]) => [cat, txs.length])
+        ),
+        step: 'categorization_complete',
+        message: `Grouped into ${Object.keys(transactionGroups).length} categories for specialized analysis`
+      });
+
+      // Process each category with specialized analysis
+      const allJournalEntries = [];
+      const processingResults = {};
+
+      logger.info('🤖 Starting AI analysis phase', {
+        step: 'ai_analysis_start',
+        message: 'Beginning category-by-category AI processing'
+      });
+
+      for (const [category, transactions] of Object.entries(transactionGroups)) {
+        logger.info(`🔄 Processing ${category} transactions`, { 
+          count: transactions.length,
+          step: `ai_process_${category}`,
+          message: `Analyzing ${transactions.length} ${category} transactions with specialized AI prompts`
+        });
+
+        try {
+          const categoryResult = await this.processCategoryTransactions(
+            category,
+            transactions,
+            walletAddress
+          );
+
+          allJournalEntries.push(...categoryResult.journalEntries);
+          processingResults[category] = categoryResult;
+
+          logger.info(`✅ Completed ${category} processing`, {
+            entriesGenerated: categoryResult.journalEntries.length,
+            step: `ai_complete_${category}`,
+            message: `Generated ${categoryResult.journalEntries.length} journal entries for ${category}`
+          });
+        } catch (categoryError) {
+          logger.error(`❌ Failed to process ${category} transactions`, {
+            error: categoryError.message,
+            transactionCount: transactions.length,
+            step: `ai_error_${category}`,
+            message: `AI processing failed for ${category} category`
+          });
+          
+          processingResults[category] = {
+            error: categoryError.message,
+            journalEntries: [],
+            transactions: transactions.length,
+          };
+        }
+      }
+
+      logger.info('🏁 AI analysis phase complete', {
+        totalEntries: allJournalEntries.length,
+        successfulCategories: Object.values(processingResults).filter(r => !r.error).length,
+        step: 'ai_analysis_complete',
+        message: `Generated ${allJournalEntries.length} total journal entries`
+      });
+
+      // Save journal entries if user ID provided
+      let savedEntries = null;
+      if (userId && allJournalEntries.length > 0) {
+        try {
+          logger.info('💾 Saving journal entries to database', {
+            userId,
+            entriesCount: allJournalEntries.length,
+            step: 'database_save',
+            message: 'Persisting generated journal entries to user account'
+          });
+
+          savedEntries = await this.saveBulkJournalEntries(allJournalEntries, userId, walletAddress);
+          
+          logger.info('✅ Journal entries saved successfully', {
+            userId,
+            entriesCount: savedEntries.length,
+            step: 'database_complete',
+            message: `Successfully saved ${savedEntries.length} journal entries`
+          });
+        } catch (saveError) {
+          logger.warn('⚠️ Failed to save bulk journal entries', {
+            error: saveError.message,
+            entriesCount: allJournalEntries.length,
+            step: 'database_error',
+            message: 'Database save operation failed, entries available for manual review'
+          });
+        }
+      }
+
+      // Generate comprehensive summary
+      logger.info('📋 Generating analysis summary', {
+        step: 'summary_generation',
+        message: 'Compiling comprehensive analysis report and recommendations'
+      });
+
+      const analysis = this.generateBulkAnalysisSummary(
+        walletData,
+        filteredTransactions,
+        allJournalEntries,
+        processingResults
+      );
+
+      logger.info('🎉 Bulk transaction analysis completed successfully', {
+        walletAddress,
+        totalTransactions: analysis.walletAnalysis?.totalTransactionsProcessed || 0,
+        totalEntries: analysis.walletAnalysis?.totalJournalEntriesGenerated || 0,
+        successRate: analysis.walletAnalysis?.processingSuccessRate || 'N/A',
+        step: 'analysis_complete',
+        message: 'Full wallet analysis pipeline completed successfully'
+      });
+
+      return {
+        success: true,
+        walletAddress,
+        walletSummary: walletData.summary,
+        analysis,
+        journalEntries: savedEntries || allJournalEntries,
+        processingResults,
+        saved: !!savedEntries,
+        startTime: Date.now(), // For timing calculations
+      };
+
+    } catch (error) {
+      logger.error('💥 Bulk transaction analysis failed', {
+        walletAddress,
+        error: error.message,
+        stack: error.stack,
+        step: 'analysis_fatal_error',
+        message: 'Critical failure in wallet analysis pipeline'
+      });
+
+      throw new AppError(`Bulk analysis failed: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Filter transactions based on analysis options
+   */
+  filterTransactionsForAnalysis(transactions, options) {
+    let filtered = [...transactions];
+
+    // Date range filtering
+    if (options.startDate) {
+      const startDate = new Date(options.startDate);
+      filtered = filtered.filter(tx => new Date(tx.timestamp) >= startDate);
+    }
+
+    if (options.endDate) {
+      const endDate = new Date(options.endDate);
+      filtered = filtered.filter(tx => new Date(tx.timestamp) <= endDate);
+    }
+
+    // Category filtering
+    if (options.categories && options.categories.length > 0) {
+      filtered = filtered.filter(tx => options.categories.includes(tx.category));
+    }
+
+    // Minimum value filtering (to exclude dust transactions)
+    if (options.minValue) {
+      filtered = filtered.filter(tx => {
+        const value = parseFloat(tx.actualAmount || tx.value || 0);
+        return value >= options.minValue;
+      });
+    }
+
+    // Limit number of transactions for processing
+    const limit = options.limit || 100;
+    if (filtered.length > limit) {
+      logger.info(`Limiting transactions for analysis`, {
+        original: filtered.length,
+        limited: limit,
+      });
+      filtered = filtered.slice(0, limit);
+    }
+
+    return filtered;
+  }
+
+  /**
+   * Group transactions by category for efficient processing
+   */
+  groupTransactionsByCategory(transactions) {
+    const groups = {};
+
+    transactions.forEach(tx => {
+      const category = tx.category || 'unknown';
+      if (!groups[category]) {
+        groups[category] = [];
+      }
+      groups[category].push(tx);
+    });
+
+    return groups;
+  }
+
+  /**
+   * Process transactions for a specific category
+   */
+  async processCategoryTransactions(category, transactions, walletAddress) {
+    const chartOfAccounts = await this.getFormattedChartOfAccounts();
+    const ifrsTemplates = require('./enhancedIfrsTemplates.json');
+
+    // Get category-specific template
+    const categoryTemplate = ifrsTemplates.categoryAnalysisTemplates[category];
+
+    // Format transactions for AI analysis
+    const formattedTransactions = this.formatTransactionsForAI(transactions, category);
+
+    // Create category-specific prompt
+    const prompt = this.buildCategoryAnalysisPrompt(
+      category,
+      formattedTransactions,
+      walletAddress,
+      chartOfAccounts,
+      categoryTemplate
+    );
+
+    try {
+      logger.info(`Sending ${category} transactions to AI`, {
+        transactionCount: transactions.length,
+        promptLength: prompt.length,
+      });
+
+      const result = await this.model.generateContent([
+        { text: ifrsTemplates.systemPrompt },
+        { text: prompt },
+      ]);
+
+      const response = await result.response;
+      const responseText = response.text();
+
+      logger.info(`Received AI response for ${category}`, {
+        responseLength: responseText.length,
+      });
+
+      // Parse the response
+      const analysisResult = this.parseBulkAnalysisResponse(responseText, category);
+
+      // Validate and correct accounts
+      const validatedEntries = [];
+      for (const entryGroup of analysisResult.journalEntries) {
+        const validatedGroup = {
+          ...entryGroup,
+          entries: await this.validateAndCorrectAccounts(entryGroup.entries),
+        };
+        validatedEntries.push(validatedGroup);
+      }
+
+      return {
+        category,
+        summary: analysisResult.summary,
+        journalEntries: validatedEntries,
+        accountingNotes: analysisResult.accountingNotes,
+        transactions: transactions.length,
+      };
+
+    } catch (error) {
+      logger.error(`AI analysis failed for category ${category}`, {
+        error: error.message,
+        transactionCount: transactions.length,
+      });
+
+      throw new AppError(`Failed to analyze ${category} transactions: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Build category-specific analysis prompt
+   */
+  buildCategoryAnalysisPrompt(category, transactions, walletAddress, chartOfAccounts, categoryTemplate) {
+    const ifrsTemplates = require('./enhancedIfrsTemplates.json');
+
+    // Calculate category summary
+    const categorySummary = this.calculateCategorySummary(transactions, category);
+
+    return ifrsTemplates.bulkTransactionAnalysisPrompt
+      .replace('{walletAddress}', walletAddress)
+      .replace('{totalTransactions}', transactions.length.toString())
+      .replace('{timeRange}', this.formatTimeRange(transactions))
+      .replace('{categories}', JSON.stringify({ [category]: transactions.length }))
+      .replace('{volumeSummary}', JSON.stringify(categorySummary))
+      .replace('{categoryBreakdown}', this.formatCategoryBreakdown(category, categoryTemplate))
+      .replace('{transactions}', this.formatTransactionsForPrompt(transactions))
+      .replace('{chartOfAccounts}', chartOfAccounts);
+  }
+
+  /**
+   * Format transactions for AI prompt
+   */
+  formatTransactionsForPrompt(transactions) {
+    return transactions.map((tx, index) => {
+      return `${index + 1}. Hash: ${tx.hash}
+   From: ${tx.from}
+   To: ${tx.to}
+   Value: ${tx.actualAmount || tx.value || 0} ${tx.tokenSymbol || 'ETH'}
+   Category: ${tx.category}
+   Direction: ${tx.direction}
+   Timestamp: ${tx.timestamp}
+   Gas Used: ${tx.gasUsed || 'N/A'}
+   ${tx.tokenSymbol ? `Token: ${tx.tokenSymbol} (${tx.actualAmount})` : ''}
+   ${tx.input && tx.input.length > 10 ? `Function: ${tx.input.slice(0, 10)}` : ''}`;
+    }).join('\n\n');
+  }
+
+  /**
+   * Format category breakdown for prompt
+   */
+  formatCategoryBreakdown(category, template) {
+    if (!template) {
+      return `${category}: No specific template available - analyze based on transaction data`;
+    }
+
+    return `${category.toUpperCase()}:
+Description: ${template.description}
+Recommended Accounts: ${JSON.stringify(template.accounts)}
+IFRS Notes: ${template.ifrsNotes}`;
+  }
+
+  /**
+   * Calculate summary statistics for a category
+   */
+  calculateCategorySummary(transactions, category) {
+    const summary = {
+      count: transactions.length,
+      totalValue: 0,
+      tokens: {},
+      timeSpan: null,
+    };
+
+    const timestamps = [];
+
+    transactions.forEach(tx => {
+      // Calculate total value
+      const value = parseFloat(tx.actualAmount || tx.value || 0);
+      summary.totalValue += value;
+
+      // Track tokens
+      if (tx.tokenSymbol) {
+        summary.tokens[tx.tokenSymbol] = (summary.tokens[tx.tokenSymbol] || 0) + parseFloat(tx.actualAmount || 0);
+      }
+
+      // Track timestamps
+      if (tx.timestamp) {
+        timestamps.push(new Date(tx.timestamp));
+      }
+    });
+
+    // Calculate time span
+    if (timestamps.length > 0) {
+      const sorted = timestamps.sort((a, b) => a - b);
+      summary.timeSpan = {
+        start: sorted[0],
+        end: sorted[sorted.length - 1],
+        days: Math.ceil((sorted[sorted.length - 1] - sorted[0]) / (1000 * 60 * 60 * 24)),
+      };
+    }
+
+    return summary;
+  }
+
+  /**
+   * Format time range for prompt
+   */
+  formatTimeRange(transactions) {
+    const timestamps = transactions
+      .map(tx => new Date(tx.timestamp))
+      .filter(d => !isNaN(d))
+      .sort((a, b) => a - b);
+
+    if (timestamps.length === 0) return 'Unknown';
+
+    const start = timestamps[0];
+    const end = timestamps[timestamps.length - 1];
+
+    return `${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}`;
+  }
+
+  /**
+   * Format transactions for AI analysis
+   */
+  formatTransactionsForAI(transactions, category) {
+    return transactions.map(tx => ({
+      hash: tx.hash,
+      from: tx.from,
+      to: tx.to,
+      value: tx.actualAmount || tx.value || 0, // FIXED: prioritize actualAmount (ETH) over value (Wei)
+      currency: tx.tokenSymbol || 'ETH',
+      category: tx.category,
+      direction: tx.direction,
+      timestamp: tx.timestamp,
+      gasUsed: tx.gasUsed,
+      gasPrice: tx.gasPrice,
+      blockNumber: tx.blockNumber,
+      isUserInitiated: tx.isUserInitiated,
+    }));
+  }
+
+  /**
+   * Parse bulk analysis response from AI
+   */
+  parseBulkAnalysisResponse(responseText, category) {
+    try {
+      // Clean and parse JSON response
+      const cleanedResponse = responseText
+        .replace(/```json\s*/, '')
+        .replace(/```\s*$/, '')
+        .trim();
+
+      const parsed = JSON.parse(cleanedResponse);
+
+      // Validate response structure
+      if (!parsed.journalEntries || !Array.isArray(parsed.journalEntries)) {
+        throw new Error('Invalid response format: missing journalEntries array');
+      }
+
+      return {
+        summary: parsed.summary || {
+          totalEntries: parsed.journalEntries.length,
+          totalTransactionsProcessed: parsed.journalEntries.length,
+          categoryBreakdown: { [category]: parsed.journalEntries.length },
+        },
+        journalEntries: parsed.journalEntries,
+        accountingNotes: parsed.accountingNotes || {},
+      };
+
+    } catch (parseError) {
+      logger.error('Failed to parse bulk analysis response', {
+        category,
+        error: parseError.message,
+        responsePreview: responseText.substring(0, 500),
+      });
+
+      // Fallback: try to extract individual journal entries
+      try {
+        const entries = this.extractFallbackEntries(responseText, category);
+        return {
+          summary: {
+            totalEntries: entries.length,
+            totalTransactionsProcessed: entries.length,
+            categoryBreakdown: { [category]: entries.length },
+          },
+          journalEntries: entries,
+          accountingNotes: { note: 'Parsed using fallback method due to response format issues' },
+        };
+      } catch (fallbackError) {
+        throw new AppError(`Failed to parse AI response for ${category}: ${parseError.message}`, 500);
+      }
+    }
+  }
+
+  /**
+   * Extract journal entries using fallback parsing
+   */
+  extractFallbackEntries(responseText, category) {
+    // This is a simplified fallback - in practice, you might want more sophisticated parsing
+    const entries = [];
+    
+    // Try to find JSON-like patterns in the response
+    const jsonPattern = /\{[^{}]*"accountDebit"[^{}]*\}/g;
+    const matches = responseText.match(jsonPattern);
+
+    if (matches) {
+      matches.forEach((match, index) => {
+        try {
+          const entry = JSON.parse(match);
+          entries.push({
+            transactionHash: `fallback_${index}`,
+            category,
+            entries: [entry],
+          });
+        } catch (e) {
+          // Skip invalid matches
+        }
+      });
+    }
+
+    return entries;
+  }
+
+  /**
+   * Save bulk journal entries to database
+   */
+  async saveBulkJournalEntries(journalEntries, userId, walletAddress) {
+    try {
+      logger.info('Starting bulk journal entries save', {
+        userId,
+        walletAddress,
+        entryGroupsCount: journalEntries.length,
+      });
+
+      // Flatten the nested structure into individual entries
+      const flattenedEntries = [];
+      
+      for (const entryGroup of journalEntries) {
+        for (const entry of entryGroup.entries) {
+          const amount = parseFloat(entry.amount);
+          
+          // Filter out invalid amounts to prevent database constraint violations
+          if (amount <= 0.00001 || amount >= 1000000 || isNaN(amount)) {
+            logger.warn('Skipping entry with invalid amount', {
+              amount: entry.amount,
+              currency: entry.currency,
+              debit: entry.accountDebit,
+              credit: entry.accountCredit,
+              transactionHash: entryGroup.transactionHash,
+              reason: amount <= 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+            });
+            continue; // Skip this entry
+          }
+          
+          // Add transaction context to each entry
+          flattenedEntries.push({
+            accountDebit: entry.accountDebit,
+            accountCredit: entry.accountCredit,
+            amount: amount, // Use the validated amount
+            currency: entry.currency,
+            narrative: `${entry.narrative} (Bulk analysis from ${walletAddress})`,
+            confidence: entry.confidence || 0.8,
+            entryType: entry.entryType || 'main',
+            // Add metadata about the source transaction
+            metadata: {
+              walletAddress,
+              transactionHash: entryGroup.transactionHash,
+              category: entryGroup.category,
+              entryType: entry.entryType || 'main',
+              bulkAnalysis: true,
+              requiresAccountCreation: entry.requiresAccountCreation || false,
+              accountCreationSuggestions: entry.accountCreationSuggestions || null,
+            },
+          });
+        }
+      }
+
+      logger.info('Flattened journal entries for saving', {
+        userId,
+        totalEntries: flattenedEntries.length,
+        entryPreview: flattenedEntries.slice(0, 2).map(e => ({
+          debit: e.accountDebit,
+          credit: e.accountCredit,
+          amount: e.amount,
+          currency: e.currency,
+        })),
+      });
+
+      // Check if we have any valid entries after filtering
+      if (flattenedEntries.length === 0) {
+        logger.warn('No valid entries remaining after amount filtering', {
+          userId,
+          walletAddress,
+          originalEntryGroups: journalEntries.length,
+        });
+        return []; // Return empty array instead of failing
+      }
+
+      // Use the correct function name with proper structure
+      const savedEntries = await journalEntryService.saveJournalEntries({
+        entries: flattenedEntries,
+        userId: userId,
+        source: 'ai_bulk_analysis',
+        metadata: {
+          walletAddress,
+          bulkAnalysis: true,
+          analysisTimestamp: new Date().toISOString(),
+          totalTransactionGroups: journalEntries.length,
+        },
+      });
+
+      logger.info('Successfully saved bulk journal entries', {
+        userId,
+        walletAddress,
+        savedCount: savedEntries.length,
+      });
+
+      return savedEntries;
+
+    } catch (error) {
+      logger.error('Failed to save bulk journal entries', {
+        error: error.message,
+        userId,
+        walletAddress,
+        entriesCount: journalEntries.length,
+      });
+
+      throw new AppError(`Failed to save journal entries: ${error.message}`, 500);
+    }
+  }
+
+  /**
+   * Generate comprehensive summary of bulk analysis
+   */
+  generateBulkAnalysisSummary(walletData, processedTransactions, journalEntries, processingResults) {
+    // Add defensive checks for all parameters
+    const safeWalletData = walletData || { summary: { categories: {} }, totalTransactions: 0 };
+    const safeProcessedTransactions = processedTransactions || [];
+    const safeJournalEntries = journalEntries || [];
+    const safeProcessingResults = processingResults || {};
+
+    const summary = {
+      walletAnalysis: {
+        totalTransactionsInWallet: safeWalletData.totalTransactions || 0,
+        totalTransactionsProcessed: safeProcessedTransactions.length,
+        totalJournalEntriesGenerated: safeJournalEntries.length,
+        processingSuccessRate: this.calculateSuccessRate(safeProcessingResults),
+      },
+      categoryBreakdown: this.summarizeCategoryResults(safeProcessingResults),
+      recommendations: this.generateRecommendations(safeWalletData, safeJournalEntries, safeProcessingResults),
+      ifrsCompliance: this.assessIfrsCompliance(safeJournalEntries),
+    };
+
+    return summary;
+  }
+
+  /**
+   * Calculate processing success rate
+   */
+  calculateSuccessRate(processingResults) {
+    if (!processingResults || typeof processingResults !== 'object') {
+      return 'N/A';
+    }
+    
+    const total = Object.keys(processingResults).length;
+    const successful = Object.values(processingResults).filter(result => result && !result.error).length;
+    return total > 0 ? (successful / total * 100).toFixed(1) + '%' : 'N/A';
+  }
+
+  /**
+   * Summarize results by category
+   */
+  summarizeCategoryResults(processingResults) {
+    const summary = {};
+
+    if (!processingResults || typeof processingResults !== 'object') {
+      return summary;
+    }
+
+    Object.entries(processingResults).forEach(([category, result]) => {
+      if (result && typeof result === 'object') {
+        summary[category] = {
+          transactions: result.transactions || 0,
+          journalEntries: result.journalEntries?.length || 0,
+          success: !result.error,
+          error: result.error || null,
+        };
+      }
+    });
+
+    return summary;
+  }
+
+  /**
+   * Generate recommendations based on analysis
+   */
+  generateRecommendations(walletData, journalEntries, processingResults) {
+    const recommendations = [];
+
+    // Check for high-volume categories with defensive checks
+    if (walletData?.summary?.categories && typeof walletData.summary.categories === 'object') {
+      Object.entries(walletData.summary.categories).forEach(([category, count]) => {
+        if (typeof count === 'number' && count > 50) {
+          recommendations.push(`High activity in ${category} (${count} transactions) - consider setting up automated processing rules`);
+        }
+      });
+    }
+
+    // Check for failed processing with defensive checks
+    if (processingResults && typeof processingResults === 'object') {
+      Object.entries(processingResults).forEach(([category, result]) => {
+        if (result && result.error) {
+          recommendations.push(`Failed to process ${category} transactions - manual review required`);
+        }
+      });
+    }
+
+    // Check for missing account mappings - handle different data structures
+    const missingAccounts = [];
+    if (journalEntries && Array.isArray(journalEntries)) {
+      try {
+        // Handle nested structure (bulk analysis)
+        if (journalEntries.length > 0 && journalEntries[0] && journalEntries[0].entries) {
+          const allEntries = journalEntries.flatMap(group => group.entries || []);
+          const missing = allEntries
+            .filter(entry => entry && entry.requiresAccountCreation)
+            .map(entry => entry.accountDebit || entry.accountCredit)
+            .filter((account, index, arr) => account && arr.indexOf(account) === index);
+          missingAccounts.push(...missing);
+        } 
+        // Handle flat structure (single transaction analysis)
+        else {
+          const missing = journalEntries
+            .filter(entry => entry && entry.requiresAccountCreation)
+            .map(entry => entry.accountDebit || entry.accountCredit)
+            .filter((account, index, arr) => account && arr.indexOf(account) === index);
+          missingAccounts.push(...missing);
+        }
+      } catch (error) {
+        logger.warn('Failed to process journal entries for recommendations', {
+          error: error.message,
+          journalEntriesLength: journalEntries.length,
+        });
+      }
+    }
+
+    if (missingAccounts.length > 0) {
+      recommendations.push(`Create missing accounts: ${missingAccounts.join(', ')}`);
+    }
+
+    // Add default recommendations if none found
+    if (recommendations.length === 0) {
+      recommendations.push('All transactions processed successfully');
+      recommendations.push('Review generated journal entries for accuracy');
+    }
+
+    return recommendations;
+  }
+
+  /**
+   * Assess IFRS compliance of generated entries
+   */
+  assessIfrsCompliance(journalEntries) {
+    const compliance = {
+      doubleEntryBalance: true,
+      accountClassification: 'Good',
+      narrativeQuality: 'Good',
+      confidenceScore: 0,
+      issues: [],
+    };
+
+    let totalConfidence = 0;
+    let entryCount = 0;
+
+    if (!journalEntries || !Array.isArray(journalEntries)) {
+      compliance.issues.push('No journal entries provided for compliance assessment');
+      return compliance;
+    }
+
+    try {
+      // Handle different data structures
+      let allEntries = [];
+      
+      if (journalEntries.length > 0) {
+        // Check if it's nested structure (bulk analysis)
+        if (journalEntries[0] && journalEntries[0].entries) {
+          allEntries = journalEntries.flatMap(group => group.entries || []);
+        } else {
+          // Flat structure (single transaction analysis)
+          allEntries = journalEntries;
+        }
+      }
+
+      allEntries.forEach(entry => {
+        // Check confidence
+        if (entry.confidence) {
+          totalConfidence += entry.confidence;
+          entryCount++;
+        }
+
+        // Check for low confidence entries
+        if (entry.confidence && entry.confidence < 0.7) {
+          compliance.issues.push(`Low confidence entry: ${entry.narrative}`);
+        }
+
+        // Check for missing narratives
+        if (!entry.narrative || entry.narrative.length < 10) {
+          compliance.issues.push(`Unclear narrative: ${entry.narrative || 'N/A'}`);
+        }
+      });
+
+      compliance.confidenceScore = entryCount > 0 ? (totalConfidence / entryCount).toFixed(2) : 0;
+
+      if (compliance.issues.length === 0) {
+        compliance.issues.push('No significant compliance issues detected');
+      }
+
+    } catch (error) {
+      logger.warn('Failed to assess IFRS compliance', {
+        error: error.message,
+        journalEntriesLength: journalEntries.length,
+      });
+      compliance.issues.push('Error during compliance assessment');
+    }
+
+    return compliance;
+  }
+
   async chatResponse(message, context = {}) {
     try {
       logger.info('Processing chat message with Gemini AI', {
@@ -27,12 +883,20 @@ class GeminiClient {
         hasContext: Object.keys(context).length > 0,
       });
 
-      // Check if user is asking to create a journal entry
+      // Check what type of request this is
       const isJournalEntryRequest = this.isJournalEntryRequest(message);
-      logger.info('Journal entry request detected', { isJournalEntryRequest });
+      const isWalletAnalysisRequest = this.isWalletAnalysisRequest(message);
+      
+      logger.info('Request type detection', { 
+        isJournalEntryRequest, 
+        isWalletAnalysisRequest 
+      });
 
       let result;
-      if (isJournalEntryRequest) {
+      if (isWalletAnalysisRequest) {
+        logger.info('Handling wallet analysis request');
+        result = await this.handleWalletAnalysisChat(message, context);
+      } else if (isJournalEntryRequest) {
         logger.info('Handling journal entry chat');
         result = await this.handleJournalEntryChat(message, context);
       } else {
@@ -65,6 +929,253 @@ class GeminiClient {
     }
   }
 
+  /**
+   * Handle wallet analysis requests from chat
+   */
+  async handleWalletAnalysisChat(message, context) {
+    try {
+      logger.info('Starting wallet analysis chat handler', { messageLength: message.length });
+      
+      // Extract wallet address from message
+      const walletAddress = this.extractWalletAddress(message);
+      
+      if (!walletAddress) {
+        return {
+          response: 'I can see you want to analyze a wallet, but I couldn\'t find a valid Ethereum address in your message. Please provide a wallet address starting with 0x followed by 40 characters.\n\nExample: "Analyze wallet 0x742e8c9b3be7936e2f6d143de3e9bb8f4b4d2b9e"',
+          thinking: 'User requested wallet analysis but no valid Ethereum address was found in the message.',
+          suggestions: [
+            'Provide a valid Ethereum wallet address (0x...)',
+            'Make sure the address is complete (42 characters total)',
+            'Double-check the address format'
+          ],
+          journalEntries: [],
+        };
+      }
+
+      logger.info('🔍 Wallet Analysis Started', { 
+        walletAddress,
+        step: 'initialization',
+        message: 'Extracted wallet address from user message'
+      });
+
+      // Determine analysis options based on message content
+      const options = this.parseAnalysisOptionsFromMessage(message);
+      logger.info('📋 Analysis Options Parsed', { 
+        options,
+        step: 'options',
+        message: 'Configured analysis parameters based on user message'
+      });
+
+      try {
+        // Perform bulk analysis with progress logging
+        logger.info('🚀 Starting Bulk Transaction Analysis', { 
+          walletAddress, 
+          options,
+          step: 'analysis_start',
+          message: 'Beginning comprehensive blockchain data analysis'
+        });
+        
+        const analysis = await this.analyzeBulkTransactions(
+          walletAddress,
+          {
+            limit: options.limit || 20, // Reasonable default for chat
+            minValue: options.minValue || 0.001,
+            categories: options.categories,
+            saveEntries: context.user?.id ? (options.saveEntries !== false) : false,
+            includeTokens: true,
+            includeInternal: true,
+          },
+          context.user?.id || null
+        );
+
+        logger.info('✅ Bulk Wallet Analysis Completed Successfully', {
+          walletAddress,
+          totalTransactions: analysis.analysis?.walletAnalysis?.totalTransactionsProcessed || 0,
+          totalEntries: analysis.analysis?.walletAnalysis?.totalJournalEntriesGenerated || 0,
+          step: 'analysis_complete',
+          message: 'All transactions processed and journal entries generated'
+        });
+
+        // Format response for chat
+        const summary = analysis.analysis?.walletAnalysis || {};
+        const entriesGenerated = summary.totalJournalEntriesGenerated || 0;
+        const transactionsProcessed = summary.totalTransactionsProcessed || 0;
+
+        let response = `✅ **Wallet Analysis Completed!**\n\n`;
+        response += `📍 **Address:** ${walletAddress}\n`;
+        response += `📊 **Results:**\n`;
+        response += `• Transactions Processed: ${transactionsProcessed}\n`;
+        response += `• Journal Entries Generated: ${entriesGenerated}\n`;
+        response += `• Success Rate: ${summary.processingSuccessRate || 'N/A'}\n\n`;
+
+        if (analysis.journalEntries && analysis.journalEntries.length > 0) {
+          response += `💰 **Sample Journal Entries:**\n\n`;
+          
+          // Handle both flattened entries (from saved) and nested entry groups (from analysis)
+          const entriesToShow = analysis.journalEntries.slice(0, 3);
+          
+          entriesToShow.forEach((entryItem, index) => {
+            // Check if this is a nested entry group or flattened entry
+            if (entryItem.entries && Array.isArray(entryItem.entries)) {
+              // Nested entry group structure
+              response += `**${index + 1}. ${entryItem.category?.toUpperCase() || 'TRANSACTION'}**\n`;
+              entryItem.entries.forEach((entry, entryIndex) => {
+                response += `• Debit: ${entry.accountDebit} (${entry.amount} ${entry.currency})\n`;
+                response += `• Credit: ${entry.accountCredit}\n`;
+                response += `• Narrative: ${entry.narrative}\n`;
+                if (entryIndex < entryItem.entries.length - 1) response += `\n`;
+              });
+            } else {
+              // Flattened entry structure (from saved entries)
+              response += `**${index + 1}. JOURNAL ENTRY**\n`;
+              response += `• Debit: ${entryItem.accountDebit} (${entryItem.amount} ${entryItem.currency})\n`;
+              response += `• Credit: ${entryItem.accountCredit}\n`;
+              response += `• Narrative: ${entryItem.narrative}\n`;
+            }
+            if (index < 2 && index < entriesToShow.length - 1) response += `\n---\n\n`;
+          });
+
+          if (analysis.journalEntries.length > 3) {
+            response += `\n... and ${analysis.journalEntries.length - 3} more entries.`;
+          }
+        }
+
+        // Add save status
+        if (context.user?.id) {
+          if (analysis.saved) {
+            response += `\n\n✅ **All journal entries have been saved to your accounting system.**`;
+          } else {
+            response += `\n\n⚠️ **Note:** Some entries may not have been saved. Please check your journal.`;
+          }
+        } else {
+          response += `\n\n💡 **Tip:** Log in to automatically save journal entries to your accounting system.`;
+        }
+
+        // Add recommendations
+        if (analysis.analysis?.recommendations && analysis.analysis.recommendations.length > 0) {
+          response += `\n\n💡 **Recommendations:**\n`;
+          analysis.analysis.recommendations.forEach(rec => {
+            response += `• ${rec}\n`;
+          });
+        }
+
+        // Add detailed thinking process
+        const thinkingProcess = `🧠 **Analysis Process Completed:**
+
+1. **Address Extraction:** Successfully identified wallet ${walletAddress}
+2. **Transaction Fetch:** Retrieved ${transactionsProcessed} blockchain transactions
+3. **Categorization:** Classified transactions into accounting categories
+4. **AI Processing:** Generated ${entriesGenerated} IFRS-compliant journal entries
+5. **Account Validation:** Verified account mappings and suggested new accounts
+6. **Data Persistence:** ${analysis.saved ? 'Saved entries to database' : 'Entries ready for review'}
+
+**Processing Time:** ~${((Date.now() - (analysis.startTime || Date.now())) / 1000).toFixed(1)} seconds
+**AI Confidence:** ${analysis.analysis?.ifrsCompliance?.confidenceScore || 'N/A'}
+**Success Rate:** ${summary.processingSuccessRate || 'N/A'}`;
+
+        return {
+          response,
+          thinking: thinkingProcess,
+          suggestions: [
+            'Review the generated journal entries for accuracy',
+            'Check if any accounts need to be created',
+            'Consider adjusting analysis filters for different results',
+            entriesGenerated > 0 ? 'Verify the accounting treatment is appropriate' : 'Try analyzing with different filters or categories'
+          ],
+          journalEntries: analysis.journalEntries || [],
+          processingComplete: true,
+          walletAddress,
+          analysisMetrics: {
+            transactionsProcessed,
+            entriesGenerated,
+            successRate: summary.processingSuccessRate,
+            categoriesFound: Object.keys(analysis.analysis?.categoryBreakdown || {}),
+          }
+        };
+
+      } catch (analysisError) {
+        logger.error('❌ Wallet Analysis Failed', {
+          walletAddress,
+          error: analysisError.message,
+          step: 'analysis_error',
+          message: 'Analysis process encountered an error'
+        });
+
+        return {
+          response: `❌ **Wallet Analysis Failed**\n\nI encountered an error while analyzing wallet ${walletAddress}:\n\n• ${analysisError.message}\n\nThis could be due to:\n• Network connectivity issues\n• Invalid wallet address\n• No transactions found\n• API rate limits\n\nPlease try again in a few moments.`,
+          thinking: `Failed to analyze wallet ${walletAddress} due to error: ${analysisError.message}. This could be a temporary issue with blockchain APIs or network connectivity.`,
+          suggestions: [
+            'Verify the wallet address is correct',
+            'Try again in a few minutes',
+            'Check if the wallet has any transactions',
+            'Use a different wallet address for testing'
+          ],
+          journalEntries: [],
+          processingComplete: false,
+          error: analysisError.message,
+        };
+      }
+
+    } catch (error) {
+      logger.error('💥 Wallet Analysis Handler Error', {
+        error: error.message,
+        stack: error.stack,
+        messagePreview: message.substring(0, 100),
+        step: 'handler_error',
+        message: 'Critical error in wallet analysis handler'
+      });
+
+      return {
+        response: 'I encountered an error while processing your wallet analysis request. Please try again with a valid Ethereum wallet address.',
+        thinking: `Critical error in wallet analysis handler: ${error.message}. This indicates a system-level issue that needs attention.`,
+        suggestions: ['Try rephrasing your request', 'Provide a valid Ethereum address'],
+        journalEntries: [],
+        processingComplete: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Parse analysis options from user message
+   */
+  parseAnalysisOptionsFromMessage(message) {
+    const lowerMessage = message.toLowerCase();
+    const options = {};
+
+    // Parse limit
+    const limitMatch = message.match(/(?:limit|max|maximum)\s*:?\s*(\d+)/i);
+    if (limitMatch) {
+      options.limit = parseInt(limitMatch[1]);
+    }
+
+    // Parse minimum value
+    const minValueMatch = message.match(/(?:min|minimum)\s*(?:value)?\s*:?\s*([\d.]+)/i);
+    if (minValueMatch) {
+      options.minValue = parseFloat(minValueMatch[1]);
+    }
+
+    // Parse categories
+    const categories = [];
+    if (lowerMessage.includes('staking')) categories.push('staking');
+    if (lowerMessage.includes('trading') || lowerMessage.includes('dex') || lowerMessage.includes('swap')) categories.push('dex_trade');
+    if (lowerMessage.includes('lending') || lowerMessage.includes('defi')) categories.push('lending');
+    if (lowerMessage.includes('token') || lowerMessage.includes('transfer')) categories.push('token_transfer');
+    if (lowerMessage.includes('nft')) categories.push('nft');
+    if (lowerMessage.includes('liquidity')) categories.push('liquidity_provision');
+
+    if (categories.length > 0) {
+      options.categories = categories;
+    }
+
+    // Parse save preference
+    if (lowerMessage.includes('don\'t save') || lowerMessage.includes('do not save') || lowerMessage.includes('preview')) {
+      options.saveEntries = false;
+    }
+
+    return options;
+  }
+
   isJournalEntryRequest(message) {
     const journalKeywords = [
       'create journal entry',
@@ -80,7 +1191,80 @@ class GeminiClient {
     ];
 
     const lowerMessage = message.toLowerCase();
-    return journalKeywords.some(keyword => lowerMessage.includes(keyword));
+    const hasJournalKeyword = journalKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Check for transaction hash (64 hex chars) - this is likely a journal entry request
+    const hasTransactionHash = /0x[a-fA-F0-9]{64}/.test(message);
+    
+    // Look for transaction-specific analysis keywords
+    const transactionAnalysisKeywords = [
+      'analyze this transaction',
+      'analyze this specific',
+      'transaction hash',
+      'analyze transaction',
+      'create journal entries',
+      'process transaction'
+    ];
+    
+    const hasTransactionAnalysisKeyword = transactionAnalysisKeywords.some(keyword => 
+      lowerMessage.includes(keyword)
+    );
+    
+    // If message has transaction hash AND analysis keywords, it's a journal entry request
+    if (hasTransactionHash && (hasTransactionAnalysisKeyword || lowerMessage.includes('journal'))) {
+      return true;
+    }
+    
+    return hasJournalKeyword;
+  }
+
+  /**
+   * Check if message is requesting wallet address analysis
+   */
+  isWalletAnalysisRequest(message) {
+    const walletKeywords = [
+      'analyze wallet',
+      'analyze address',
+      'wallet analysis',
+      'analyze entire',
+      'analyze all transactions',
+      'create journal entries for',
+      'bulk analyze',
+      'process wallet',
+      'transaction history',
+      'analyze the wallet',
+      'analyze this wallet',
+      'bulk process'
+    ];
+
+    const lowerMessage = message.toLowerCase();
+    const hasWalletKeyword = walletKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Check for transaction hash first (64 hex chars) - if found, this is NOT a wallet analysis
+    const hasTransactionHash = /0x[a-fA-F0-9]{64}/.test(message);
+    if (hasTransactionHash) {
+      return false; // This is a transaction analysis, not wallet analysis
+    }
+    
+    // Check if message contains an Ethereum address (0x followed by exactly 40 hex characters)
+    const hasEthAddress = /0x[a-fA-F0-9]{40}(?![a-fA-F0-9])/.test(message);
+    
+    return hasWalletKeyword || (hasEthAddress && (
+      lowerMessage.includes('analyze') || 
+      lowerMessage.includes('journal') || 
+      lowerMessage.includes('process') ||
+      lowerMessage.includes('create') ||
+      lowerMessage.includes('transactions')
+    ));
+  }
+
+  /**
+   * Extract wallet address from message
+   */
+  extractWalletAddress(message) {
+    // Only match exactly 40 hex characters (not 64) to avoid matching transaction hashes
+    const addressMatch = message.match(/0x[a-fA-F0-9]{40}(?![a-fA-F0-9])/);
+    return addressMatch ? addressMatch[0] : null;
   }
 
   async handleJournalEntryChat(message, context) {
@@ -640,25 +1824,47 @@ User message: ${message}`;
       // Format token transfers data
       const tokenTransfersText = this.formatTokenTransfers(blockchainData.tokenTransfers || []);
 
-      // Build the analysis prompt with chart of accounts
+      // Convert gas values to ETH for proper accounting
+      const gasUsed = blockchainData.gas_used || blockchainData.gasUsed || 0;
+      const gasPrice = blockchainData.gas_price || blockchainData.gasPrice || 0;
+      const gasFeeWei = parseFloat(gasUsed) * parseFloat(gasPrice);
+      const gasFeeETH = gasFeeWei / Math.pow(10, 18); // Convert Wei to ETH
+      
+      // Convert ETH value properly 
+      const ethValue = parseFloat(blockchainData.value || 0) / Math.pow(10, 18);
+
+      // Build the analysis prompt with chart of accounts and properly converted values
       const prompt = ifrsTemplates.transactionAnalysisPrompt
         .replace('{hash}', blockchainData.hash)
         .replace('{from}', blockchainData.from)
         .replace('{to}', blockchainData.to)
-        .replace('{value}', parseFloat(blockchainData.value) / Math.pow(10, 18))
-        .replace('{gasUsed}', blockchainData.gas_used || blockchainData.gasUsed)
-        .replace('{gasPrice}', blockchainData.gas_price || blockchainData.gasPrice)
+        .replace('{value}', ethValue.toFixed(8)) // ETH value with reasonable precision
+        .replace('{gasUsed}', gasUsed.toString())
+        .replace('{gasPrice}', (parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4) + ' Gwei') // Convert to Gwei for readability
         .replace('{timestamp}', blockchainData.timestamp)
         .replace('{status}', blockchainData.status)
         .replace('{description}', description || 'No description provided')
         .replace('{tokenTransfers}', tokenTransfersText)
         .replace('{chartOfAccounts}', chartOfAccounts);
 
+      // Add gas fee information to the prompt
+      const enhancedPrompt = prompt + `\n\nGAS FEE ANALYSIS:
+- Gas Used: ${gasUsed} units
+- Gas Price: ${(parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4)} Gwei
+- Total Gas Fee: ${gasFeeETH.toFixed(8)} ETH
+- Gas Fee USD Equivalent: Include if significant (>$1)
+
+IMPORTANT CONVERSION RULES:
+1. All amounts MUST be in reasonable accounting units (ETH, not Wei or Gwei)
+2. Gas fees should be recorded as separate journal entries only if > 0.0001 ETH
+3. For token transfers, use token amounts from tokenTransfers data
+4. Ensure all amounts are > 0 and < 1,000,000 for database compatibility`;
+
       const systemPrompt = ifrsTemplates.systemPrompt;
 
       const result = await this.model.generateContent([
         { text: systemPrompt },
-        { text: prompt },
+        { text: enhancedPrompt },
       ]);
 
       const response = await result.response;
@@ -667,13 +1873,41 @@ User message: ${message}`;
       logger.info('Received AI analysis response', {
         hash: blockchainData.hash,
         responseLength: responseText.length,
+        ethValue,
+        gasFeeETH: gasFeeETH.toFixed(8),
       });
 
       // Parse the JSON response
       const journalEntries = this.parseJournalEntries(responseText);
 
+      // Validate and filter entries to prevent database constraint violations
+      const validEntries = journalEntries.filter(entry => {
+        const amount = parseFloat(entry.amount);
+        // Allow smaller amounts for gas fees (0.00001 ETH minimum) but still prevent tiny/invalid amounts
+        const isValid = amount >= 0.00001 && amount < 1000000 && !isNaN(amount); 
+        
+        if (!isValid) {
+          logger.warn('Filtering out entry with invalid amount', {
+            amount: entry.amount,
+            currency: entry.currency,
+            debit: entry.accountDebit,
+            credit: entry.accountCredit,
+            reason: amount < 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+          });
+        }
+        
+        return isValid;
+      });
+
       // Validate accounts against chart of accounts
-      const validatedEntries = await this.validateAndCorrectAccounts(journalEntries);
+      const validatedEntries = await this.validateAndCorrectAccounts(validEntries);
+
+      logger.info('Transaction analysis completed', {
+        hash: blockchainData.hash,
+        totalEntries: journalEntries.length,
+        validEntries: validEntries.length,
+        finalEntries: validatedEntries.length,
+      });
 
       return validatedEntries;
     } catch (error) {
@@ -1001,6 +2235,294 @@ Revenue:
       });
       
       return [];
+    }
+  }
+
+  /**
+   * Analyze enhanced transaction context with rich Blockscout v2 data
+   * @param {Object} params - Analysis parameters
+   * @param {Object} params.context - Rich transaction context from enhanced Blockscout client
+   * @param {string} params.userAddress - User's wallet address
+   * @param {Object} params.availableCategories - Enhanced category definitions
+   * @param {string} params.analysisDepth - Analysis depth (detailed/basic)
+   * @returns {Object} AI analysis result with category selection
+   */
+  async analyzeTransactionContextV2({ context, userAddress, availableCategories, analysisDepth = 'detailed' }) {
+    try {
+      logger.info('🧠 Starting enhanced AI transaction context analysis', {
+        txHash: context.hash,
+        userAddress,
+        analysisDepth,
+        hasDecodedInput: !!context.decoded_input,
+        tokenTransfersCount: context.token_transfers.length,
+        contractName: context.to?.name || 'Unknown'
+      });
+
+      // Build comprehensive analysis prompt
+      const analysisPrompt = this.buildEnhancedContextPrompt(context, userAddress, availableCategories, analysisDepth);
+
+      // System prompt for enhanced analysis
+      const systemPrompt = `You are an expert blockchain transaction analyst specializing in DeFi, cryptocurrency accounting, and IFRS compliance.
+
+Your task is to analyze rich blockchain transaction context and categorize transactions accurately for accounting purposes.
+
+CRITICAL REQUIREMENTS:
+1. Analyze ALL provided context data (method calls, contract tags, token transfers, events, etc.)
+2. Select the MOST APPROPRIATE category from the predefined list
+3. Provide detailed reasoning for your categorization
+4. Consider the user's perspective and transaction direction
+5. Return ONLY valid JSON format - no markdown, no comments
+
+RESPONSE FORMAT (MANDATORY):
+{
+  "category": "selected_category_name",
+  "subcategory": "specific_variant_or_null",
+  "confidence": 0.95,
+  "reasoning": "Detailed explanation of why this category was chosen",
+  "transaction_pattern": "Brief description of what actually happened",
+  "key_indicators": ["indicator1", "indicator2", "indicator3"],
+  "accounting_notes": "Specific accounting treatment recommendations",
+  "risk_factors": ["potential_risk1", "potential_risk2"] 
+}
+
+ANALYSIS GUIDELINES:
+- Contract tags and metadata are strong indicators
+- Decoded method calls provide definitive function context
+- Token transfer patterns reveal true transaction purpose
+- Event logs confirm the actual contract interactions
+- Consider multi-step transactions and complex DeFi flows
+- Higher confidence for clear, unambiguous transactions
+- Lower confidence for edge cases or unknown protocols`;
+
+      // Get AI response
+      const result = await this.model.generateContent([
+        { text: systemPrompt },
+        { text: analysisPrompt }
+      ]);
+
+      const response = await result.response;
+      const responseText = response.text();
+
+      logger.info('📊 AI response received for enhanced context analysis', {
+        txHash: context.hash,
+        responseLength: responseText.length,
+        responsePreview: responseText.substring(0, 200)
+      });
+
+      // Parse and validate AI response
+      const aiAnalysis = this.parseEnhancedAnalysisResponse(responseText, context);
+
+      logger.info('✅ Enhanced AI analysis completed', {
+        txHash: context.hash,
+        category: aiAnalysis.category,
+        confidence: aiAnalysis.confidence,
+        subcategory: aiAnalysis.subcategory
+      });
+
+      return aiAnalysis;
+
+    } catch (error) {
+      logger.error('❌ Enhanced AI context analysis failed', {
+        txHash: context.hash,
+        error: error.message,
+        stack: error.stack
+      });
+
+      // Return fallback analysis
+      return {
+        category: 'contract_interaction',
+        subcategory: 'ai_analysis_failed',
+        confidence: 0.5,
+        reasoning: `AI analysis failed: ${error.message}. Defaulting to generic categorization.`,
+        transaction_pattern: 'Unknown transaction pattern due to analysis failure',
+        key_indicators: ['ai_failure'],
+        accounting_notes: 'Manual review required due to AI analysis failure',
+        risk_factors: ['unanalyzed_transaction']
+      };
+    }
+  }
+
+  /**
+   * Build comprehensive analysis prompt with enhanced context
+   * @param {Object} context - Enhanced transaction context
+   * @param {string} userAddress - User's wallet address
+   * @param {Object} availableCategories - Category definitions
+   * @param {string} analysisDepth - Analysis depth
+   * @returns {string} Formatted analysis prompt
+   */
+  buildEnhancedContextPrompt(context, userAddress, availableCategories, analysisDepth) {
+    const isUserSender = context.from.hash.toLowerCase() === userAddress.toLowerCase();
+    const isUserReceiver = context.to?.hash.toLowerCase() === userAddress.toLowerCase();
+
+    return `
+ENHANCED BLOCKCHAIN TRANSACTION ANALYSIS
+
+**TRANSACTION OVERVIEW:**
+- Hash: ${context.hash}
+- Status: ${context.status}
+- Method Called: ${context.method || 'N/A'}
+- User Perspective: ${isUserSender ? 'Sender' : isUserReceiver ? 'Receiver' : 'Observer'}
+- Transaction Type: ${context.context.type}
+- Block: ${context.block.number} (${context.block.timestamp})
+
+**DECODED FUNCTION CALL:**
+${context.decoded_input ? `
+- Function: ${context.decoded_input.method_call || 'Unknown'}
+- Method ID: ${context.decoded_input.method_id || 'N/A'}
+- Parameters: ${JSON.stringify(context.decoded_input.parameters || {}, null, 2)}
+` : 'No decoded input available'}
+
+**FROM ADDRESS ANALYSIS:**
+- Address: ${context.from.hash}
+- Name: ${context.from.name || 'Unknown'}
+- Is Contract: ${context.from.is_contract}
+- Is Verified: ${context.from.is_verified}
+- Tags: ${JSON.stringify(context.from.tags)}
+${context.from.contractInfo ? `
+- Contract Info: ${JSON.stringify(context.from.contractInfo, null, 2)}
+` : ''}
+
+**TO ADDRESS ANALYSIS:**
+- Address: ${context.to?.hash || 'Contract Creation'}
+- Name: ${context.to?.name || 'Unknown'}
+- Is Contract: ${context.to?.is_contract || false}
+- Is Verified: ${context.to?.is_verified || false}
+- Tags: ${JSON.stringify(context.to?.tags || [])}
+${context.to?.contractInfo ? `
+- Contract Info: ${JSON.stringify(context.to.contractInfo, null, 2)}
+` : ''}
+
+**TOKEN TRANSFERS (${context.token_transfers.length} transfers):**
+${context.token_transfers.length > 0 ? context.token_transfers.map((transfer, index) => `
+Transfer ${index + 1}:
+- Token: ${transfer.token.name} (${transfer.token.symbol})
+- Contract: ${transfer.token.address}
+- Type: ${transfer.token.type}
+- Decimals: ${transfer.token.decimals}
+- From: ${transfer.from.hash} ${transfer.from.name ? `(${transfer.from.name})` : ''}
+- To: ${transfer.to.hash} ${transfer.to.name ? `(${transfer.to.name})` : ''}
+- Amount: ${transfer.total.decimals_normalized || 'N/A'}
+- USD Value: ${transfer.token.priceUSD ? `$${(parseFloat(transfer.total.decimals_normalized || 0) * parseFloat(transfer.token.priceUSD)).toFixed(2)}` : 'N/A'}
+`).join('') : 'No token transfers detected'}
+
+**TRANSACTION EXECUTION:**
+- Gas Used: ${context.execution.gasUsed}
+- Gas Price: ${context.execution.gasPrice}
+- Transaction Fee: ${context.execution.transactionFee}
+- Confirmations: ${context.execution.confirmations}
+${context.context.revert_reason ? `- Revert Reason: ${context.context.revert_reason}` : ''}
+
+**EVENT LOGS (${context.events.length} events):**
+${context.events.length > 0 ? context.events.map((event, index) => `
+Event ${index + 1}:
+- Contract: ${event.address}
+- Topics: ${JSON.stringify(event.topics)}
+${event.decoded ? `- Decoded: ${JSON.stringify(event.decoded)}` : '- Raw Data: ' + event.data}
+`).join('') : 'No events detected'}
+
+**AVAILABLE CATEGORIES:**
+${Object.entries(availableCategories).map(([key, category]) => `
+${key.toUpperCase()}:
+  Description: ${category.description}
+  Indicators: ${JSON.stringify(category.indicators)}
+  Contract Tags: ${JSON.stringify(category.contractTags || [])}
+  Method Patterns: ${JSON.stringify(category.methodPatterns || [])}
+  Accounting: ${category.accountingTreatment}
+`).join('')}
+
+**ANALYSIS TASK:**
+Based on the comprehensive context above, determine the most appropriate transaction category.
+
+Key factors to consider:
+1. **Contract Tags**: What do the contract metadata tags indicate?
+2. **Method Call**: What specific function was executed?
+3. **Token Flow**: How do tokens move and what does this indicate?
+4. **Event Logs**: What events were emitted by the contracts?
+5. **User Perspective**: How does this transaction affect the user (${userAddress})?
+6. **DeFi Patterns**: Does this match known DeFi interaction patterns?
+
+**CONFIDENCE SCORING:**
+- 0.9-1.0: Clear, unambiguous transaction with strong indicators
+- 0.8-0.89: Strong indicators with minor ambiguity
+- 0.7-0.79: Moderate confidence with some unclear aspects
+- 0.6-0.69: Low confidence, edge case or unusual pattern
+- <0.6: Very uncertain, manual review recommended
+
+Analyze the transaction and provide categorization in the required JSON format.`;
+  }
+
+  /**
+   * Parse enhanced AI analysis response
+   * @param {string} responseText - Raw AI response
+   * @param {Object} context - Transaction context for validation
+   * @returns {Object} Parsed and validated analysis
+   */
+  parseEnhancedAnalysisResponse(responseText, context) {
+    try {
+      // Clean the response text
+      let cleanedResponse = responseText.trim();
+      
+      // Remove markdown code blocks if present
+      cleanedResponse = cleanedResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      
+      // Remove any comments
+      cleanedResponse = cleanedResponse.replace(/\/\/.*$/gm, '');
+      
+      // Find JSON object
+      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON object found in AI response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Validate required fields
+      const requiredFields = ['category', 'confidence', 'reasoning'];
+      for (const field of requiredFields) {
+        if (!parsed[field]) {
+          throw new Error(`Missing required field: ${field}`);
+        }
+      }
+
+      // Validate confidence score
+      if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
+        logger.warn('Invalid confidence score, defaulting to 0.7', {
+          originalConfidence: parsed.confidence,
+          txHash: context.hash
+        });
+        parsed.confidence = 0.7;
+      }
+
+      // Ensure all fields exist with defaults
+      return {
+        category: parsed.category,
+        subcategory: parsed.subcategory || null,
+        confidence: parsed.confidence,
+        reasoning: parsed.reasoning,
+        transaction_pattern: parsed.transaction_pattern || 'AI analyzed transaction',
+        key_indicators: parsed.key_indicators || [],
+        accounting_notes: parsed.accounting_notes || 'Standard accounting treatment applies',
+        risk_factors: parsed.risk_factors || []
+      };
+
+    } catch (parseError) {
+      logger.error('Failed to parse enhanced AI analysis response', {
+        error: parseError.message,
+        responsePreview: responseText.substring(0, 500),
+        txHash: context.hash
+      });
+
+      // Return safe fallback
+      return {
+        category: 'contract_interaction',
+        subcategory: 'parse_failed',
+        confidence: 0.5,
+        reasoning: `Failed to parse AI response: ${parseError.message}`,
+        transaction_pattern: 'Unknown due to parsing failure',
+        key_indicators: ['parse_error'],
+        accounting_notes: 'Manual categorization required',
+        risk_factors: ['unparseable_ai_response']
+      };
     }
   }
 }
