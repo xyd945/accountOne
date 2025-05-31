@@ -1333,6 +1333,7 @@ IFRS Notes: ${template.ifrsNotes}`;
               ...(savedEntries ? ['View saved entries in your journal'] : ['Save these entries to your accounting system']),
             ],
             journalEntries: savedEntries || journalEntries, // Return saved entries or original ones
+            alreadySaved: !!savedEntries, // Flag to prevent duplicate saving in chat route
           };
         } catch (blockchainError) {
           logger.warn('Failed to fetch blockchain data', {
@@ -1824,21 +1825,38 @@ User message: ${message}`;
       // Format token transfers data
       const tokenTransfersText = this.formatTokenTransfers(blockchainData.tokenTransfers || []);
 
-      // Convert gas values to ETH for proper accounting
+      // Detect blockchain based on environment or chain ID (Coston2 vs Ethereum)
+      const isCoston2 = process.env.BLOCKSCOUT_BASE_URL?.includes('coston2') || 
+                        blockchainData.chainId === 114 || 
+                        blockchainData.chain_id === 114;
+      
+      const blockchain = isCoston2 ? 'Coston2 (Chain ID 114)' : 'Ethereum Mainnet';
+      const gasCurrency = isCoston2 ? 'C2FLR' : 'ETH';
+      
+      logger.info('Blockchain detection', {
+        hash: blockchainData.hash,
+        blockchain,
+        gasCurrency,
+        isCoston2,
+        baseUrl: process.env.BLOCKSCOUT_BASE_URL
+      });
+
+      // Convert gas values for proper accounting
       const gasUsed = blockchainData.gas_used || blockchainData.gasUsed || 0;
       const gasPrice = blockchainData.gas_price || blockchainData.gasPrice || 0;
       const gasFeeWei = parseFloat(gasUsed) * parseFloat(gasPrice);
-      const gasFeeETH = gasFeeWei / Math.pow(10, 18); // Convert Wei to ETH
+      const gasFee = gasFeeWei / Math.pow(10, 18); // Convert Wei to base units
       
-      // Convert ETH value properly 
-      const ethValue = parseFloat(blockchainData.value || 0) / Math.pow(10, 18);
+      // Convert native token value properly 
+      const nativeValue = parseFloat(blockchainData.value || 0) / Math.pow(10, 18);
 
       // Build the analysis prompt with chart of accounts and properly converted values
       const prompt = ifrsTemplates.transactionAnalysisPrompt
         .replace('{hash}', blockchainData.hash)
         .replace('{from}', blockchainData.from)
         .replace('{to}', blockchainData.to)
-        .replace('{value}', ethValue.toFixed(8)) // ETH value with reasonable precision
+        .replace('{value}', nativeValue.toFixed(8)) // Native token value with reasonable precision
+        .replace('{blockchain}', blockchain) // Add blockchain information
         .replace('{gasUsed}', gasUsed.toString())
         .replace('{gasPrice}', (parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4) + ' Gwei') // Convert to Gwei for readability
         .replace('{timestamp}', blockchainData.timestamp)
@@ -1847,18 +1865,21 @@ User message: ${message}`;
         .replace('{tokenTransfers}', tokenTransfersText)
         .replace('{chartOfAccounts}', chartOfAccounts);
 
-      // Add gas fee information to the prompt
-      const enhancedPrompt = prompt + `\n\nGAS FEE ANALYSIS:
+      // Add enhanced gas fee information with correct currency
+      const enhancedPrompt = prompt + `\n\nGAS FEE ANALYSIS (${blockchain}):
 - Gas Used: ${gasUsed} units
 - Gas Price: ${(parseFloat(gasPrice) / Math.pow(10, 9)).toFixed(4)} Gwei
-- Total Gas Fee: ${gasFeeETH.toFixed(8)} ETH
-- Gas Fee USD Equivalent: Include if significant (>$1)
+- Total Gas Fee: ${gasFee.toFixed(8)} ${gasCurrency}
+- Blockchain: ${blockchain}
+- Gas Currency: ${gasCurrency} (${isCoston2 ? 'Coston2 Testnet Token' : 'Ethereum'})
 
-IMPORTANT CONVERSION RULES:
-1. All amounts MUST be in reasonable accounting units (ETH, not Wei or Gwei)
-2. Gas fees should be recorded as separate journal entries only if > 0.0001 ETH
-3. For token transfers, use token amounts from tokenTransfers data
-4. Ensure all amounts are > 0 and < 1,000,000 for database compatibility`;
+BLOCKCHAIN-SPECIFIC RULES:
+1. For ${blockchain}: Use ${gasCurrency} for gas fees, NOT ETH
+2. All amounts MUST be in reasonable accounting units (${gasCurrency}, not Wei or Gwei)
+3. Gas fees should be recorded as separate journal entries only if > 0.0001 ${gasCurrency}
+4. For token transfers, use token amounts from tokenTransfers data
+5. Ensure all amounts are > 0 and < 1,000,000 for database compatibility
+6. Create specific "Digital Assets - [TOKEN_SYMBOL]" accounts, not generic "Other"`;
 
       const systemPrompt = ifrsTemplates.systemPrompt;
 
@@ -1873,8 +1894,10 @@ IMPORTANT CONVERSION RULES:
       logger.info('Received AI analysis response', {
         hash: blockchainData.hash,
         responseLength: responseText.length,
-        ethValue,
-        gasFeeETH: gasFeeETH.toFixed(8),
+        blockchain,
+        gasCurrency,
+        nativeValue,
+        gasFee: gasFee.toFixed(8),
       });
 
       // Parse the JSON response
@@ -1883,7 +1906,7 @@ IMPORTANT CONVERSION RULES:
       // Validate and filter entries to prevent database constraint violations
       const validEntries = journalEntries.filter(entry => {
         const amount = parseFloat(entry.amount);
-        // Allow smaller amounts for gas fees (0.00001 ETH minimum) but still prevent tiny/invalid amounts
+        // Allow smaller amounts for gas fees (0.00001 minimum) but still prevent tiny/invalid amounts
         const isValid = amount >= 0.00001 && amount < 1000000 && !isNaN(amount); 
         
         if (!isValid) {
@@ -1904,6 +1927,8 @@ IMPORTANT CONVERSION RULES:
 
       logger.info('Transaction analysis completed', {
         hash: blockchainData.hash,
+        blockchain,
+        gasCurrency,
         totalEntries: journalEntries.length,
         validEntries: validEntries.length,
         finalEntries: validatedEntries.length,
@@ -2195,9 +2220,9 @@ DO NOT convert or calculate - use the numbers directly.`;
         let debitAccount = 'Digital Assets - Other';
         let creditAccount = 'Accounts Payable'; // Default for refunds
         
-        // Check for specific currency mentions - updated for Coston2
+        // Check for specific currency mentions - create specific accounts for known tokens
         if (currency === 'XYD') {
-          debitAccount = 'Digital Assets - Other'; // XYD goes to "Other" account
+          debitAccount = 'Digital Assets - XYD'; // Use specific XYD account
         } else if (currency === 'C2FLR' || currency === 'FLARE') {
           debitAccount = 'Digital Assets - C2FLR';
         } else if (currency === 'USDC') {
@@ -2208,6 +2233,9 @@ DO NOT convert or calculate - use the numbers directly.`;
           debitAccount = 'Digital Assets - Bitcoin';
         } else if (currency === 'USDT') {
           debitAccount = 'Digital Assets - USDT';
+        } else {
+          // For unknown tokens, use a more specific format: "Digital Assets - [SYMBOL]"
+          debitAccount = `Digital Assets - ${currency}`;
         }
         
         // Determine credit account based on context
