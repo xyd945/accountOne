@@ -186,7 +186,7 @@ router.post('/chat',
       }
 
       // Check if the AI generated any journal entries and save them automatically
-      if (response.journalEntries && response.journalEntries.length > 0) {
+      if (response.journalEntries && response.journalEntries.length > 0 && !response.alreadySaved) {
         try {
           logger.info('AI generated journal entries, saving automatically', {
             userId,

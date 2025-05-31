@@ -503,6 +503,10 @@ router.get('/journal-entries', [
       .select(`
         *,
         transaction_date,
+        usd_value,
+        usd_rate,
+        usd_source,
+        usd_timestamp,
         transactions(user_id, txid, description)
       `, { count: 'exact' })
       .eq('user_id', userId)
