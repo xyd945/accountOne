@@ -1,66 +1,21 @@
-## Foundry
+# Flare Foundry Starter
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Install the project dependencies.
 
-Foundry consists of:
-
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```bash
+forge soldeer install
 ```
 
-### Test
+You might have to modify the `remappings.txt` so that `/src` part of path is before the non src part
+Like this
 
-```shell
-$ forge test
+```bash
+@openzeppelin-contracts/=dependencies/@openzeppelin-contracts-5.2.0-rc.1/
+flare-periphery/=dependencies/flare-periphery-0.0.23/
+forge-std/=dependencies/forge-std-1.9.5/src/
+forge-std/=dependencies/forge-std-1.9.5/
+surl/=dependencies/surl-0.0.0/src/
+surl/=dependencies/surl-0.0.0/
 ```
 
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+Copy the `.env.example` to `.env` and fill in the `PRIVATE_KEY`

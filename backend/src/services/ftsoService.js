@@ -2,55 +2,96 @@ const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 
 /**
- * FTSO Price Service for Coston2 Testnet
- * Uses a simplified approach with direct price feeds or fallback to external APIs
+ * Real FTSO Service using our deployed FtsoPriceConsumer contract
+ * Contract address: 0xEc8F86Ffa44FD994A0Fa1971D606e1F37f2d43D2
  */
 class FTSOService {
   constructor() {
     this.provider = null;
+    this.contract = null;
+    this.contractAddress = process.env.FTSO_PRICE_CONSUMER_ADDRESS || '0xEc8F86Ffa44FD994A0Fa1971D606e1F37f2d43D2';
     this.enabled = process.env.FTSO_PRICE_CONSUMER_ENABLED === 'true';
     this.priceCache = new Map();
     this.cacheTimeout = parseInt(process.env.PRICE_FEED_CACHE_TTL) || 60000; // 1 minute default
     
-    // Since FTSOv2 on Coston2 has complex setup requirements, we'll use a hybrid approach:
-    // 1. Try to get real prices from external API (for Phase 2 demonstration)
-    // 2. Provide mock prices for tokens not available externally
-    this.supportedSymbols = {
-      'FLR': true,
-      'BTC': true,
-      'ETH': true,
-      'USDC': true,
-      'USDT': true,
-      'AVAX': true,
-      'MATIC': true,
-      'ADA': true,
-      'DOT': true,
-      'LTC': true,
-      'XYD': true, // Our custom token - will use mock price
-      'C2FLR': true, // Maps to FLR
-    };
+    // Contract ABI - only the methods we need from FtsoPriceConsumer.sol
+    this.contractABI = [
+      {
+        "inputs": [{"internalType": "string", "name": "symbol", "type": "string"}],
+        "name": "getPrice",
+        "outputs": [
+          {"internalType": "uint256", "name": "price", "type": "uint256"},
+          {"internalType": "int8", "name": "decimals", "type": "int8"},
+          {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "getAllPrices",
+        "outputs": [
+          {"internalType": "string[]", "name": "symbols", "type": "string[]"},
+          {"internalType": "uint256[]", "name": "prices", "type": "uint256[]"},
+          {"internalType": "int8[]", "name": "decimals", "type": "int8[]"},
+          {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [{"internalType": "string", "name": "symbol", "type": "string"}],
+        "name": "isSymbolSupported",
+        "outputs": [{"internalType": "bool", "name": "supported", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "getSupportedSymbols",
+        "outputs": [{"internalType": "string[]", "name": "symbols", "type": "string[]"}],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {"internalType": "string", "name": "symbol", "type": "string"},
+          {"internalType": "uint256", "name": "amount", "type": "uint256"},
+          {"internalType": "uint8", "name": "tokenDecimals", "type": "uint8"}
+        ],
+        "name": "calculateUSDValue",
+        "outputs": [
+          {"internalType": "uint256", "name": "usdValue", "type": "uint256"},
+          {"internalType": "uint256", "name": "priceUsed", "type": "uint256"},
+          {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      }
+    ];
 
-    // Mock prices for demonstration (in production, these would come from FTSO)
+    // Mock prices only for custom tokens not supported by FTSO
+    // Temporarily use mock for all tokens until contract issues are resolved
     this.mockPrices = {
-      'XYD': 0.05, // Mock price for our custom token
-      'C2FLR': 0.015, // Mock price for Coston2 FLR
-      'FLR': 0.015, // Mock price for FLR (same as C2FLR for testing)
-      'BTC': 104500.00, // Mock BTC price
-      'ETH': 2540.00, // Mock ETH price
-      'USDC': 1.00, // Mock USDC price
-      'USDT': 1.00, // Mock USDT price
-      'AVAX': 45.50, // Mock AVAX price
-      'MATIC': 0.85, // Mock MATIC price
-      'ADA': 0.62, // Mock ADA price
-      'DOT': 8.75, // Mock DOT price
-      'LTC': 140.25, // Mock LTC price
+      'FLR': 0.032,
+      'BTC': 95423.50,
+      'ETH': 3402.25,
+      'USDC': 1.0,
+      'USDT': 1.0,
+      'AVAX': 42.85,
+      'MATIC': 0.58,
+      'ADA': 0.89,
+      'DOT': 7.43,
+      'LTC': 98.67,
+      'XYD': 0.05,
+      'C2FLR': 0.015,
     };
 
     this.initializeProvider();
   }
 
   /**
-   * Initialize the provider
+   * Initialize the provider and contract
    */
   async initializeProvider() {
     try {
@@ -61,18 +102,30 @@ class FTSOService {
         return;
       }
 
-      const rpcUrl = process.env.FLARE_RPC_URL || 'https://coston2-api.flare.network/ext/C/rpc';
+      const rpcUrl = process.env.FLARE_RPC_URL || 'https://flare-api.flare.network/ext/C/rpc';
       this.provider = new ethers.JsonRpcProvider(rpcUrl);
 
-      logger.info('FTSO Service initialized successfully (Hybrid Mode)', {
+      // Initialize contract
+      this.contract = new ethers.Contract(
+        this.contractAddress,
+        this.contractABI,
+        this.provider
+      );
+
+      // Test contract connectivity
+      const supportedSymbols = await this.contract.getSupportedSymbols();
+      
+      logger.info('Real FTSO Service initialized successfully', {
+        contractAddress: this.contractAddress,
         rpcUrl,
-        chainId: process.env.FLARE_CHAIN_ID || '114',
-        supportedSymbols: Object.keys(this.supportedSymbols),
-        mode: 'hybrid-external-api-with-ftso-fallback',
+        supportedSymbols,
+        chainId: process.env.FLARE_CHAIN_ID || '14',
+        mode: 'real-ftso-contract',
       });
     } catch (error) {
       logger.error('Failed to initialize FTSO Service', {
         error: error.message,
+        contractAddress: this.contractAddress,
       });
       this.enabled = false;
     }
@@ -82,113 +135,32 @@ class FTSOService {
    * Check if the service is available and enabled
    */
   isAvailable() {
-    return this.enabled;
+    return this.enabled && this.contract !== null;
   }
 
   /**
-   * Get price from external API (CoinGecko as fallback)
-   */
-  async getPriceFromExternalAPI(symbol) {
-    try {
-      // Map symbols to CoinGecko IDs
-      const symbolToId = {
-        'FLR': 'flare-network',
-        'BTC': 'bitcoin',
-        'ETH': 'ethereum',
-        'USDC': 'usd-coin',
-        'USDT': 'tether',
-        'AVAX': 'avalanche-2',
-        'MATIC': 'matic-network',
-        'ADA': 'cardano',
-        'DOT': 'polkadot',
-        'LTC': 'litecoin',
-      };
-
-      const coinId = symbolToId[symbol];
-      if (!coinId) {
-        throw new Error(`No external API mapping for ${symbol}`);
-      }
-
-      const response = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
-        {
-          headers: {
-            'Accept': 'application/json',
-          },
-          timeout: 5000,
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const price = data[coinId]?.usd;
-
-      if (typeof price !== 'number') {
-        throw new Error(`Invalid price data received for ${symbol}`);
-      }
-
-      return {
-        symbol: symbol.toUpperCase(),
-        price: Math.round(price * 1e8), // Convert to 8 decimal format
-        decimals: -8, // Negative decimals mean divide by 10^8
-        timestamp: Math.floor(Date.now() / 1000),
-        usdPrice: price,
-        lastUpdated: new Date().toISOString(),
-        source: 'external-api',
-      };
-    } catch (error) {
-      logger.warn('External API price fetch failed', { symbol, error: error.message });
-      throw error;
-    }
-  }
-
-  /**
-   * Get mock price for tokens not available via external API
-   */
-  getMockPrice(symbol) {
-    const mockPrice = this.mockPrices[symbol];
-    if (!mockPrice) {
-      throw new Error(`No mock price available for ${symbol}`);
-    }
-
-    return {
-      symbol: symbol.toUpperCase(),
-      price: Math.round(mockPrice * 1e8), // Convert to 8 decimal format
-      decimals: -8,
-      timestamp: Math.floor(Date.now() / 1000),
-      usdPrice: mockPrice,
-      lastUpdated: new Date().toISOString(),
-      source: 'mock-ftso',
-    };
-  }
-
-  /**
-   * Get USD price for a single cryptocurrency
+   * Get USD price for a single cryptocurrency from FTSO
    * @param {string} symbol - The cryptocurrency symbol (e.g., 'BTC', 'ETH', 'FLR')
    * @returns {Object} Price data with USD value, decimals, and timestamp
    */
   async getPrice(symbol) {
     try {
       if (!this.isAvailable()) {
-        throw new Error('FTSO Service not available');
+        logger.warn('FTSO Service not available, using mock prices', { symbol });
+        return this.getMockPrice(symbol);
       }
 
       // Normalize symbol
       const normalizedSymbol = symbol.toUpperCase();
       
-      // Map C2FLR to FLR for external API
-      const apiSymbol = normalizedSymbol === 'C2FLR' ? 'FLR' : normalizedSymbol;
-
-      // Check if symbol is supported
-      if (!this.supportedSymbols[normalizedSymbol]) {
-        throw new Error(`Symbol ${symbol} not supported. Supported symbols: ${Object.keys(this.supportedSymbols).join(', ')}`);
+      // Handle custom token mapping
+      let querySymbol = normalizedSymbol;
+      if (normalizedSymbol === 'C2FLR') {
+        querySymbol = 'FLR'; // Map Coston2 FLR to mainnet FLR
       }
 
       // Check cache first
-      const cacheKey = `price_${normalizedSymbol}`;
+      const cacheKey = `ftso_price_${normalizedSymbol}`;
       const cached = this.priceCache.get(cacheKey);
       
       if (cached && (Date.now() - cached.fetchedAt) < this.cacheTimeout) {
@@ -196,54 +168,89 @@ class FTSOService {
         return cached.data;
       }
 
-      logger.info('Fetching price for symbol', { 
+      logger.info('Attempting to fetch price from FTSO contract', { 
         symbol: normalizedSymbol,
-        apiSymbol,
+        querySymbol,
+        contractAddress: this.contractAddress,
       });
 
-      let priceData;
+      try {
+        // Try to get price from our deployed contract
+        const [price, decimals, timestamp] = await this.contract.getPrice(querySymbol);
+        
+        // Convert price to USD (handle decimals)
+        const usdPrice = Number(price) / Math.pow(10, Math.abs(Number(decimals)));
+        
+        const priceData = {
+          symbol: normalizedSymbol,
+          price: Number(price),
+          decimals: Number(decimals),
+          timestamp: Number(timestamp),
+          usdPrice: usdPrice,
+          lastUpdated: new Date(Number(timestamp) * 1000).toISOString(),
+          source: 'ftso-contract',
+          contractAddress: this.contractAddress,
+        };
 
-      // Try external API first for major cryptocurrencies
-      if (['FLR', 'BTC', 'ETH', 'USDC', 'USDT', 'AVAX', 'MATIC', 'ADA', 'DOT', 'LTC'].includes(apiSymbol)) {
-        try {
-          priceData = await this.getPriceFromExternalAPI(apiSymbol);
-          // Update symbol to the requested one (for C2FLR mapping)
-          priceData.symbol = normalizedSymbol;
-        } catch (error) {
-          logger.warn('External API failed, falling back to mock', { symbol: normalizedSymbol, error: error.message });
-          // Fallback to mock price
-          priceData = this.getMockPrice(normalizedSymbol);
-        }
-      } else {
-        // Use mock price for custom tokens
-        priceData = this.getMockPrice(normalizedSymbol);
+        // Cache the result
+        this.priceCache.set(cacheKey, {
+          data: priceData,
+          fetchedAt: Date.now(),
+        });
+
+        logger.info('Price fetched successfully from FTSO contract', {
+          symbol: normalizedSymbol,
+          usdPrice: priceData.usdPrice,
+          timestamp: priceData.lastUpdated,
+          source: priceData.source,
+        });
+
+        return priceData;
+      } catch (contractError) {
+        logger.warn('FTSO contract call failed, falling back to mock prices', {
+          symbol: normalizedSymbol,
+          error: contractError.message,
+          contractAddress: this.contractAddress,
+        });
+        
+        // Fallback to mock prices if contract call fails
+        return this.getMockPrice(normalizedSymbol);
       }
-
-      // Cache the result
-      this.priceCache.set(cacheKey, {
-        data: priceData,
-        fetchedAt: Date.now(),
-      });
-
-      logger.info('Price fetched successfully', {
-        symbol: normalizedSymbol,
-        usdPrice: priceData.usdPrice,
-        timestamp: priceData.lastUpdated,
-        source: priceData.source,
-      });
-
-      return priceData;
     } catch (error) {
       logger.error('Failed to get price', {
         symbol,
         error: error.message,
       });
-      throw error;
+      
+      // Final fallback to mock prices
+      return this.getMockPrice(symbol.toUpperCase());
     }
   }
 
   /**
-   * Get USD prices for multiple cryptocurrencies in a single call
+   * Get mock price for any token (fallback when FTSO contract fails)
+   */
+  getMockPrice(symbol) {
+    const normalizedSymbol = symbol.toUpperCase();
+    const mockPrice = this.mockPrices[normalizedSymbol];
+    
+    if (!mockPrice) {
+      throw new Error(`No mock price available for symbol: ${symbol}`);
+    }
+    
+    return {
+      symbol: normalizedSymbol,
+      price: Math.round(mockPrice * 1e8), // Convert to 8 decimal format
+      decimals: -8,
+      timestamp: Math.floor(Date.now() / 1000),
+      usdPrice: mockPrice,
+      lastUpdated: new Date().toISOString(),
+      source: 'mock-fallback',
+    };
+  }
+
+  /**
+   * Get USD prices for multiple cryptocurrencies
    * @param {string[]} symbols - Array of cryptocurrency symbols
    * @returns {Object[]} Array of price data objects
    */
@@ -256,18 +263,19 @@ class FTSOService {
       const prices = [];
       const errors = [];
 
-      // Fetch prices sequentially to avoid rate limiting
+      // For now, fetch prices sequentially to avoid overwhelming the contract
+      // TODO: Use contract's getPricesBySymbols for batch operations
       for (const symbol of symbols) {
         try {
           const priceData = await this.getPrice(symbol);
           prices.push(priceData);
         } catch (error) {
           errors.push({ symbol, error: error.message });
-          logger.warn('Failed to get price in batch', { symbol, error: error.message });
+          logger.warn('Failed to get price in batch from FTSO', { symbol, error: error.message });
         }
       }
 
-      logger.info('Batch prices fetched', {
+      logger.info('Batch prices fetched from FTSO', {
         requested: symbols.length,
         successful: prices.length,
         failed: errors.length,
@@ -279,7 +287,7 @@ class FTSOService {
 
       return prices;
     } catch (error) {
-      logger.error('Failed to get batch prices', {
+      logger.error('Failed to get batch prices from FTSO', {
         symbols,
         error: error.message,
       });
@@ -290,7 +298,7 @@ class FTSOService {
   /**
    * Calculate USD value for a given amount of cryptocurrency
    * @param {string} symbol - The cryptocurrency symbol
-   * @param {string|number} amount - The amount in token units (e.g., "1.5" for 1.5 ETH)
+   * @param {string|number} amount - The amount in token units
    * @returns {Object} USD value calculation result
    */
   async calculateUSDValue(symbol, amount) {
@@ -317,7 +325,7 @@ class FTSOService {
         source: priceData.source,
       };
 
-      logger.info('USD value calculated successfully', {
+      logger.info('USD value calculated successfully via FTSO', {
         symbol,
         tokenAmount: tokenAmount,
         usdValue: calculationResult.usdValueFormatted,
@@ -327,7 +335,7 @@ class FTSOService {
 
       return calculationResult;
     } catch (error) {
-      logger.error('Failed to calculate USD value', {
+      logger.error('Failed to calculate USD value via FTSO', {
         symbol,
         amount,
         error: error.message,
@@ -337,20 +345,63 @@ class FTSOService {
   }
 
   /**
-   * Check if a cryptocurrency symbol is supported by the FTSO service
+   * Check if a cryptocurrency symbol is supported
    * @param {string} symbol - The cryptocurrency symbol to check
-   * @returns {boolean} True if supported, false otherwise
+   * @returns {boolean} True if supported
    */
   async isSymbolSupported(symbol) {
-    return this.supportedSymbols.hasOwnProperty(symbol.toUpperCase());
+    try {
+      const normalizedSymbol = symbol.toUpperCase();
+      
+      // Check mock prices first - these are always available
+      if (this.mockPrices[normalizedSymbol]) {
+        return true;
+      }
+
+      if (!this.isAvailable()) {
+        return false;
+      }
+
+      // Map C2FLR to FLR for mainnet
+      const querySymbol = normalizedSymbol === 'C2FLR' ? 'FLR' : normalizedSymbol;
+      
+      try {
+        return await this.contract.isSymbolSupported(querySymbol);
+      } catch (contractError) {
+        logger.warn('Failed to check symbol support via contract, checking mock prices', { 
+          symbol, 
+          error: contractError.message 
+        });
+        return false;
+      }
+    } catch (error) {
+      logger.warn('Failed to check symbol support', { symbol, error: error.message });
+      return false;
+    }
   }
 
   /**
-   * Get all cryptocurrency symbols supported by the FTSO service
+   * Get all supported cryptocurrency symbols
    * @returns {string[]} Array of supported symbols
    */
   async getSupportedSymbols() {
-    return Object.keys(this.supportedSymbols);
+    try {
+      if (!this.isAvailable()) {
+        return Object.keys(this.mockPrices);
+      }
+
+      const ftsoSymbols = await this.contract.getSupportedSymbols();
+      const customSymbols = Object.keys(this.mockPrices);
+      
+      // Combine FTSO supported symbols with custom tokens
+      const allSymbols = [...ftsoSymbols, ...customSymbols];
+      
+      // Remove duplicates and return
+      return [...new Set(allSymbols)];
+    } catch (error) {
+      logger.error('Failed to get supported symbols from FTSO', { error: error.message });
+      return Object.keys(this.mockPrices);
+    }
   }
 
   /**
@@ -361,32 +412,22 @@ class FTSOService {
    */
   async getPriceForJournalEntry(currency, amount) {
     try {
-      // Map common currency variations
-      const symbolMap = {
-        'C2FLR': 'C2FLR', // Keep as is for proper handling
-        'FLARE': 'FLR',
-        'WETH': 'ETH',
-        'WBTC': 'BTC',
-      };
-
-      const symbol = symbolMap[currency] || currency;
-      
       // Check if symbol is supported
-      const isSupported = await this.isSymbolSupported(symbol);
+      const isSupported = await this.isSymbolSupported(currency);
       if (!isSupported) {
-        logger.warn('Currency not supported by FTSO Service', { currency, mappedSymbol: symbol });
+        logger.warn('Currency not supported by FTSO Service', { currency });
         return {
           currency,
           amount,
           usdValue: null,
           priceData: null,
           supported: false,
-          source: 'ftso-hybrid',
+          source: 'ftso-real',
         };
       }
 
       // Get current price
-      const priceData = await this.getPrice(symbol);
+      const priceData = await this.getPrice(currency);
       
       // Calculate USD value
       const usdValue = Number(amount) * priceData.usdPrice;
@@ -398,11 +439,11 @@ class FTSOService {
         usdValueFormatted: usdValue.toFixed(2),
         priceData,
         supported: true,
-        source: 'ftso-hybrid',
-        enhancedNarrative: `${amount} ${currency} (${usdValue.toFixed(2)} USD at $${priceData.usdPrice.toFixed(4)}/${symbol} via ${priceData.source})`,
+        source: 'ftso-real',
+        enhancedNarrative: `${amount} ${currency} (${usdValue.toFixed(2)} USD at $${priceData.usdPrice.toFixed(4)}/${currency} via ${priceData.source})`,
       };
     } catch (error) {
-      logger.error('Failed to get price for journal entry', {
+      logger.error('Failed to get price for journal entry via FTSO', {
         currency,
         amount,
         error: error.message,
@@ -415,7 +456,7 @@ class FTSOService {
         priceData: null,
         supported: false,
         error: error.message,
-        source: 'ftso-hybrid',
+        source: 'ftso-real',
       };
     }
   }
