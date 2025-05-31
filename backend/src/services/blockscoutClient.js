@@ -276,7 +276,46 @@ class BlockscoutClient {
     const input = tx.input || '';
     const value = parseFloat(tx.actualAmount || tx.value || 0);
 
-    // Known contract patterns and addresses for categorization
+    // PRIORITY 1: Check if this transaction has token transfer data
+    // If we have token information, prioritize it over ETH value
+    if (tx.tokenSymbol && tx.actualAmount !== undefined) {
+      if (fromAddress === lowerAddress) {
+        return 'token_transfer'; // User sent tokens
+      } else if (toAddress === lowerAddress) {
+        return 'token_received'; // User received tokens
+      } else {
+        return 'token_transfer'; // Token transfer involving user
+      }
+    }
+
+    // PRIORITY 2: Check for token transfer patterns in transaction data
+    // Even if token data isn't attached, look for ERC-20 function signatures
+    if (input.length > 10) {
+      const functionSig = input.slice(0, 10);
+      
+      switch (functionSig) {
+        case '0xa9059cbb': // ERC-20 transfer
+        case '0x23b872dd': // ERC-20 transferFrom
+          return 'token_transfer';
+        case '0x095ea7b3': // ERC-20 approve
+          return 'token_approval';
+        case '0x7ff36ab5': // Uniswap swapExactETHForTokens
+        case '0x18cbafe5': // Uniswap swapExactTokensForETH
+        case '0x8803dbee': // Uniswap swapTokensForExactTokens
+          return 'dex_trade';
+        case '0xf305d719': // Uniswap addLiquidityETH
+        case '0xe8e33700': // Uniswap addLiquidity
+          return 'liquidity_provision';
+        case '0x02751cec': // Uniswap removeLiquidity
+        case '0xaf2979eb': // Uniswap removeLiquidityETH
+          return 'liquidity_removal';
+        default:
+          // Continue to other checks
+          break;
+      }
+    }
+
+    // PRIORITY 3: Known contract patterns and addresses for categorization
     const contractPatterns = {
       // Staking patterns
       staking: [
@@ -285,7 +324,7 @@ class BlockscoutClient {
         '0xae7ab96520de3a18e5e111b5eaab095312d7fe84', // stETH
       ],
       // DEX patterns (Uniswap, SushiSwap, etc.)
-      dex: [
+      dex_trade: [
         '0x7a250d5630b4cf539739df2c5dacb4c659f2488d', // Uniswap V2 Router
         '0xe592427a0aece92de3edee1f18e0157c05861564', // Uniswap V3 Router
         '0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f', // SushiSwap Router
@@ -310,34 +349,10 @@ class BlockscoutClient {
       }
     }
 
-    // Function signature analysis
-    if (input.length > 10) {
-      const functionSig = input.slice(0, 10);
-      
-      switch (functionSig) {
-        case '0xa9059cbb': // ERC-20 transfer
-          return 'token_transfer';
-        case '0x23b872dd': // ERC-20 transferFrom
-          return 'token_transfer';
-        case '0x095ea7b3': // ERC-20 approve
-          return 'token_approval';
-        case '0x7ff36ab5': // Uniswap swapExactETHForTokens
-        case '0x18cbafe5': // Uniswap swapExactTokensForETH
-        case '0x8803dbee': // Uniswap swapTokensForExactTokens
-          return 'dex_trade';
-        case '0xf305d719': // Uniswap addLiquidityETH
-        case '0xe8e33700': // Uniswap addLiquidity
-          return 'liquidity_provision';
-        case '0x02751cec': // Uniswap removeLiquidity
-        case '0xaf2979eb': // Uniswap removeLiquidityETH
-          return 'liquidity_removal';
-        default:
-          return 'contract_interaction';
-      }
-    }
-
-    // Value-based categorization
-    if (value > 0) {
+    // PRIORITY 4: Value-based categorization for ETH transfers
+    // Only categorize as ETH transfer if there's meaningful ETH value (> gas fees)
+    // Typical gas fees are < 0.01 ETH, so use 0.01 ETH as threshold
+    if (value > 0.01) { // Only consider significant ETH amounts
       if (fromAddress === lowerAddress) {
         return 'outgoing_transfer';
       } else if (toAddress === lowerAddress) {
@@ -345,12 +360,17 @@ class BlockscoutClient {
       }
     }
 
-    // Token-based categorization
-    if (tx.tokenSymbol) {
+    // PRIORITY 5: If there's any interaction but small ETH value, likely contract interaction
+    if (input && input.length > 10 && value <= 0.01) {
+      return 'contract_interaction';
+    }
+
+    // PRIORITY 6: Small ETH value transactions (likely gas fees for failed txs or minimal transfers)
+    if (value > 0 && value <= 0.01) {
       if (fromAddress === lowerAddress) {
-        return 'token_sent';
+        return 'outgoing_transfer';
       } else if (toAddress === lowerAddress) {
-        return 'token_received';
+        return 'incoming_transfer';
       }
     }
 
@@ -377,18 +397,90 @@ class BlockscoutClient {
   }
 
   /**
-   * Remove duplicate transactions (same hash from different sources)
+   * Remove duplicate transactions and merge token transfer data with regular transaction data
    */
   deduplicateTransactions(transactions) {
-    const seen = new Set();
-    return transactions.filter(tx => {
-      const key = tx.hash || tx.transactionHash;
-      if (seen.has(key)) {
-        return false;
+    const mergedTransactions = new Map();
+    
+    transactions.forEach(tx => {
+      const hash = tx.hash || tx.transactionHash;
+      
+      if (mergedTransactions.has(hash)) {
+        // Merge token data with existing transaction
+        const existing = mergedTransactions.get(hash);
+        
+        // If this is a token transaction and the existing one isn't, merge token data
+        if (tx.tokenSymbol && !existing.tokenSymbol) {
+          mergedTransactions.set(hash, {
+            ...existing,
+            // Add token information
+            tokenName: tx.tokenName,
+            tokenSymbol: tx.tokenSymbol,
+            tokenDecimal: tx.tokenDecimal,
+            contractAddress: tx.contractAddress,
+            // Override actualAmount with token amount for token transfers
+            actualAmount: tx.actualAmount,
+            // Keep both values for reference
+            tokenValue: tx.value,
+            ethValue: existing.value,
+            // Mark as token transfer
+            isTokenTransfer: true,
+            source: `${existing.source || 'regular'},token`
+          });
+        }
+        // If existing is token and this is regular, merge the other way
+        else if (!tx.tokenSymbol && existing.tokenSymbol) {
+          mergedTransactions.set(hash, {
+            ...existing,
+            // Add regular transaction data that might be missing
+            input: tx.input || existing.input,
+            gasUsed: tx.gasUsed || existing.gasUsed,
+            gasPrice: tx.gasPrice || existing.gasPrice,
+            nonce: tx.nonce || existing.nonce,
+            // Keep the token data as primary
+            ethValue: tx.value,
+            tokenValue: existing.value,
+            isTokenTransfer: true,
+            source: `${tx.source || 'regular'},token`
+          });
+        }
+        // If both have token data, prefer the one with more complete information
+        else if (tx.tokenSymbol && existing.tokenSymbol) {
+          // Keep the one with more token information or higher actualAmount
+          if ((tx.actualAmount || 0) > (existing.actualAmount || 0)) {
+            mergedTransactions.set(hash, {
+              ...existing,
+              ...tx,
+              source: `${existing.source || 'token'},${tx.source || 'token'}`
+            });
+          }
+        }
+        // For non-token duplicates, keep the one with more complete data
+        else {
+          const merged = {
+            ...existing,
+            ...tx,
+            // Preserve important fields from both
+            input: tx.input || existing.input,
+            gasUsed: tx.gasUsed || existing.gasUsed,
+            gasPrice: tx.gasPrice || existing.gasPrice,
+            source: `${existing.source || 'regular'},${tx.source || 'regular'}`
+          };
+          mergedTransactions.set(hash, merged);
+        }
+      } else {
+        // First occurrence of this transaction
+        const normalizedTx = {
+          ...tx,
+          isTokenTransfer: !!tx.tokenSymbol,
+          ethValue: tx.tokenSymbol ? '0' : tx.value, // If token transfer, ETH value is likely just gas
+          tokenValue: tx.tokenSymbol ? tx.value : null
+        };
+        mergedTransactions.set(hash, normalizedTx);
       }
-      seen.add(key);
-      return true;
     });
+    
+    return Array.from(mergedTransactions.values());
   }
 
   /**
