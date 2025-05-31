@@ -2010,6 +2010,294 @@ Revenue:
       return [];
     }
   }
+
+  /**
+   * Analyze enhanced transaction context with rich Blockscout v2 data
+   * @param {Object} params - Analysis parameters
+   * @param {Object} params.context - Rich transaction context from enhanced Blockscout client
+   * @param {string} params.userAddress - User's wallet address
+   * @param {Object} params.availableCategories - Enhanced category definitions
+   * @param {string} params.analysisDepth - Analysis depth (detailed/basic)
+   * @returns {Object} AI analysis result with category selection
+   */
+  async analyzeTransactionContextV2({ context, userAddress, availableCategories, analysisDepth = 'detailed' }) {
+    try {
+      logger.info('🧠 Starting enhanced AI transaction context analysis', {
+        txHash: context.hash,
+        userAddress,
+        analysisDepth,
+        hasDecodedInput: !!context.decoded_input,
+        tokenTransfersCount: context.token_transfers.length,
+        contractName: context.to?.name || 'Unknown'
+      });
+
+      // Build comprehensive analysis prompt
+      const analysisPrompt = this.buildEnhancedContextPrompt(context, userAddress, availableCategories, analysisDepth);
+
+      // System prompt for enhanced analysis
+      const systemPrompt = `You are an expert blockchain transaction analyst specializing in DeFi, cryptocurrency accounting, and IFRS compliance.
+
+Your task is to analyze rich blockchain transaction context and categorize transactions accurately for accounting purposes.
+
+CRITICAL REQUIREMENTS:
+1. Analyze ALL provided context data (method calls, contract tags, token transfers, events, etc.)
+2. Select the MOST APPROPRIATE category from the predefined list
+3. Provide detailed reasoning for your categorization
+4. Consider the user's perspective and transaction direction
+5. Return ONLY valid JSON format - no markdown, no comments
+
+RESPONSE FORMAT (MANDATORY):
+{
+  "category": "selected_category_name",
+  "subcategory": "specific_variant_or_null",
+  "confidence": 0.95,
+  "reasoning": "Detailed explanation of why this category was chosen",
+  "transaction_pattern": "Brief description of what actually happened",
+  "key_indicators": ["indicator1", "indicator2", "indicator3"],
+  "accounting_notes": "Specific accounting treatment recommendations",
+  "risk_factors": ["potential_risk1", "potential_risk2"] 
+}
+
+ANALYSIS GUIDELINES:
+- Contract tags and metadata are strong indicators
+- Decoded method calls provide definitive function context
+- Token transfer patterns reveal true transaction purpose
+- Event logs confirm the actual contract interactions
+- Consider multi-step transactions and complex DeFi flows
+- Higher confidence for clear, unambiguous transactions
+- Lower confidence for edge cases or unknown protocols`;
+
+      // Get AI response
+      const result = await this.model.generateContent([
+        { text: systemPrompt },
+        { text: analysisPrompt }
+      ]);
+
+      const response = await result.response;
+      const responseText = response.text();
+
+      logger.info('📊 AI response received for enhanced context analysis', {
+        txHash: context.hash,
+        responseLength: responseText.length,
+        responsePreview: responseText.substring(0, 200)
+      });
+
+      // Parse and validate AI response
+      const aiAnalysis = this.parseEnhancedAnalysisResponse(responseText, context);
+
+      logger.info('✅ Enhanced AI analysis completed', {
+        txHash: context.hash,
+        category: aiAnalysis.category,
+        confidence: aiAnalysis.confidence,
+        subcategory: aiAnalysis.subcategory
+      });
+
+      return aiAnalysis;
+
+    } catch (error) {
+      logger.error('❌ Enhanced AI context analysis failed', {
+        txHash: context.hash,
+        error: error.message,
+        stack: error.stack
+      });
+
+      // Return fallback analysis
+      return {
+        category: 'contract_interaction',
+        subcategory: 'ai_analysis_failed',
+        confidence: 0.5,
+        reasoning: `AI analysis failed: ${error.message}. Defaulting to generic categorization.`,
+        transaction_pattern: 'Unknown transaction pattern due to analysis failure',
+        key_indicators: ['ai_failure'],
+        accounting_notes: 'Manual review required due to AI analysis failure',
+        risk_factors: ['unanalyzed_transaction']
+      };
+    }
+  }
+
+  /**
+   * Build comprehensive analysis prompt with enhanced context
+   * @param {Object} context - Enhanced transaction context
+   * @param {string} userAddress - User's wallet address
+   * @param {Object} availableCategories - Category definitions
+   * @param {string} analysisDepth - Analysis depth
+   * @returns {string} Formatted analysis prompt
+   */
+  buildEnhancedContextPrompt(context, userAddress, availableCategories, analysisDepth) {
+    const isUserSender = context.from.hash.toLowerCase() === userAddress.toLowerCase();
+    const isUserReceiver = context.to?.hash.toLowerCase() === userAddress.toLowerCase();
+
+    return `
+ENHANCED BLOCKCHAIN TRANSACTION ANALYSIS
+
+**TRANSACTION OVERVIEW:**
+- Hash: ${context.hash}
+- Status: ${context.status}
+- Method Called: ${context.method || 'N/A'}
+- User Perspective: ${isUserSender ? 'Sender' : isUserReceiver ? 'Receiver' : 'Observer'}
+- Transaction Type: ${context.context.type}
+- Block: ${context.block.number} (${context.block.timestamp})
+
+**DECODED FUNCTION CALL:**
+${context.decoded_input ? `
+- Function: ${context.decoded_input.method_call || 'Unknown'}
+- Method ID: ${context.decoded_input.method_id || 'N/A'}
+- Parameters: ${JSON.stringify(context.decoded_input.parameters || {}, null, 2)}
+` : 'No decoded input available'}
+
+**FROM ADDRESS ANALYSIS:**
+- Address: ${context.from.hash}
+- Name: ${context.from.name || 'Unknown'}
+- Is Contract: ${context.from.is_contract}
+- Is Verified: ${context.from.is_verified}
+- Tags: ${JSON.stringify(context.from.tags)}
+${context.from.contractInfo ? `
+- Contract Info: ${JSON.stringify(context.from.contractInfo, null, 2)}
+` : ''}
+
+**TO ADDRESS ANALYSIS:**
+- Address: ${context.to?.hash || 'Contract Creation'}
+- Name: ${context.to?.name || 'Unknown'}
+- Is Contract: ${context.to?.is_contract || false}
+- Is Verified: ${context.to?.is_verified || false}
+- Tags: ${JSON.stringify(context.to?.tags || [])}
+${context.to?.contractInfo ? `
+- Contract Info: ${JSON.stringify(context.to.contractInfo, null, 2)}
+` : ''}
+
+**TOKEN TRANSFERS (${context.token_transfers.length} transfers):**
+${context.token_transfers.length > 0 ? context.token_transfers.map((transfer, index) => `
+Transfer ${index + 1}:
+- Token: ${transfer.token.name} (${transfer.token.symbol})
+- Contract: ${transfer.token.address}
+- Type: ${transfer.token.type}
+- Decimals: ${transfer.token.decimals}
+- From: ${transfer.from.hash} ${transfer.from.name ? `(${transfer.from.name})` : ''}
+- To: ${transfer.to.hash} ${transfer.to.name ? `(${transfer.to.name})` : ''}
+- Amount: ${transfer.total.decimals_normalized || 'N/A'}
+- USD Value: ${transfer.token.priceUSD ? `$${(parseFloat(transfer.total.decimals_normalized || 0) * parseFloat(transfer.token.priceUSD)).toFixed(2)}` : 'N/A'}
+`).join('') : 'No token transfers detected'}
+
+**TRANSACTION EXECUTION:**
+- Gas Used: ${context.execution.gasUsed}
+- Gas Price: ${context.execution.gasPrice}
+- Transaction Fee: ${context.execution.transactionFee}
+- Confirmations: ${context.execution.confirmations}
+${context.context.revert_reason ? `- Revert Reason: ${context.context.revert_reason}` : ''}
+
+**EVENT LOGS (${context.events.length} events):**
+${context.events.length > 0 ? context.events.map((event, index) => `
+Event ${index + 1}:
+- Contract: ${event.address}
+- Topics: ${JSON.stringify(event.topics)}
+${event.decoded ? `- Decoded: ${JSON.stringify(event.decoded)}` : '- Raw Data: ' + event.data}
+`).join('') : 'No events detected'}
+
+**AVAILABLE CATEGORIES:**
+${Object.entries(availableCategories).map(([key, category]) => `
+${key.toUpperCase()}:
+  Description: ${category.description}
+  Indicators: ${JSON.stringify(category.indicators)}
+  Contract Tags: ${JSON.stringify(category.contractTags || [])}
+  Method Patterns: ${JSON.stringify(category.methodPatterns || [])}
+  Accounting: ${category.accountingTreatment}
+`).join('')}
+
+**ANALYSIS TASK:**
+Based on the comprehensive context above, determine the most appropriate transaction category.
+
+Key factors to consider:
+1. **Contract Tags**: What do the contract metadata tags indicate?
+2. **Method Call**: What specific function was executed?
+3. **Token Flow**: How do tokens move and what does this indicate?
+4. **Event Logs**: What events were emitted by the contracts?
+5. **User Perspective**: How does this transaction affect the user (${userAddress})?
+6. **DeFi Patterns**: Does this match known DeFi interaction patterns?
+
+**CONFIDENCE SCORING:**
+- 0.9-1.0: Clear, unambiguous transaction with strong indicators
+- 0.8-0.89: Strong indicators with minor ambiguity
+- 0.7-0.79: Moderate confidence with some unclear aspects
+- 0.6-0.69: Low confidence, edge case or unusual pattern
+- <0.6: Very uncertain, manual review recommended
+
+Analyze the transaction and provide categorization in the required JSON format.`;
+  }
+
+  /**
+   * Parse enhanced AI analysis response
+   * @param {string} responseText - Raw AI response
+   * @param {Object} context - Transaction context for validation
+   * @returns {Object} Parsed and validated analysis
+   */
+  parseEnhancedAnalysisResponse(responseText, context) {
+    try {
+      // Clean the response text
+      let cleanedResponse = responseText.trim();
+      
+      // Remove markdown code blocks if present
+      cleanedResponse = cleanedResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      
+      // Remove any comments
+      cleanedResponse = cleanedResponse.replace(/\/\/.*$/gm, '');
+      
+      // Find JSON object
+      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON object found in AI response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Validate required fields
+      const requiredFields = ['category', 'confidence', 'reasoning'];
+      for (const field of requiredFields) {
+        if (!parsed[field]) {
+          throw new Error(`Missing required field: ${field}`);
+        }
+      }
+
+      // Validate confidence score
+      if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
+        logger.warn('Invalid confidence score, defaulting to 0.7', {
+          originalConfidence: parsed.confidence,
+          txHash: context.hash
+        });
+        parsed.confidence = 0.7;
+      }
+
+      // Ensure all fields exist with defaults
+      return {
+        category: parsed.category,
+        subcategory: parsed.subcategory || null,
+        confidence: parsed.confidence,
+        reasoning: parsed.reasoning,
+        transaction_pattern: parsed.transaction_pattern || 'AI analyzed transaction',
+        key_indicators: parsed.key_indicators || [],
+        accounting_notes: parsed.accounting_notes || 'Standard accounting treatment applies',
+        risk_factors: parsed.risk_factors || []
+      };
+
+    } catch (parseError) {
+      logger.error('Failed to parse enhanced AI analysis response', {
+        error: parseError.message,
+        responsePreview: responseText.substring(0, 500),
+        txHash: context.hash
+      });
+
+      // Return safe fallback
+      return {
+        category: 'contract_interaction',
+        subcategory: 'parse_failed',
+        confidence: 0.5,
+        reasoning: `Failed to parse AI response: ${parseError.message}`,
+        transaction_pattern: 'Unknown due to parsing failure',
+        key_indicators: ['parse_error'],
+        accounting_notes: 'Manual categorization required',
+        risk_factors: ['unparseable_ai_response']
+      };
+    }
+  }
 }
 
 module.exports = GeminiClient;
