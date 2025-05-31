@@ -590,14 +590,46 @@ IFRS Notes: ${template.ifrsNotes}`;
           const amount = parseFloat(entry.amount);
           
           // Filter out invalid amounts to prevent database constraint violations
-          if (amount <= 0.00001 || amount >= 1000000 || isNaN(amount)) {
+          // Use currency-aware validation
+          const currency = entry.currency?.toUpperCase();
+          let isValid = false;
+          
+          if (currency === 'ETH') {
+            isValid = amount >= 0.000001 && amount <= 10000;
+          } else if (currency === 'C2FLR' || currency === 'FLR') {
+            isValid = amount >= 0.00001 && amount <= 1000000;
+          } else if (currency === 'BTC') {
+            isValid = amount >= 0.00000001 && amount <= 1000;
+          } else if (['USDC', 'USDT', 'DAI'].includes(currency)) {
+            isValid = amount >= 0.01 && amount <= 10000000;
+          } else if (currency === 'XYD') {
+            isValid = amount >= 1 && amount <= 100000000;
+          } else if (currency?.includes('Gas') || currency?.includes('gas')) {
+            // Handle gas amounts - convert to proper currency
+            const actualCurrency = entry.accountCredit?.includes('C2FLR') || 
+                                 process.env.FLARE_CHAIN_ID === '114' ? 'C2FLR' : 'ETH';
+            entry.currency = actualCurrency; // Fix the currency
+            isValid = amount >= 0.00001 && amount <= 100; // Gas fees range
+          } else {
+            // Generic token validation
+            isValid = amount >= 0.00001 && amount <= 100000000;
+          }
+          
+          // Additional Wei check
+          if (amount > 1000000 && ['ETH', 'C2FLR', 'BTC'].includes(currency)) {
+            isValid = false;
+          }
+          
+          if (!isValid) {
             logger.warn('Skipping entry with invalid amount', {
               amount: entry.amount,
               currency: entry.currency,
               debit: entry.accountDebit,
               credit: entry.accountCredit,
               transactionHash: entryGroup.transactionHash,
-              reason: amount <= 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+              reason: amount > 1000000 ? 'likely Wei conversion error' : 
+                     amount < 0.00001 ? 'too small' : 
+                     amount > 100000000 ? 'too large' : 'invalid range for currency',
             });
             continue; // Skip this entry
           }
@@ -1828,7 +1860,8 @@ User message: ${message}`;
       // Detect blockchain based on environment or chain ID (Coston2 vs Ethereum)
       const isCoston2 = process.env.BLOCKSCOUT_BASE_URL?.includes('coston2') || 
                         blockchainData.chainId === 114 || 
-                        blockchainData.chain_id === 114;
+                        blockchainData.chain_id === 114 ||
+                        process.env.FLARE_CHAIN_ID === '114';
       
       const blockchain = isCoston2 ? 'Coston2 (Chain ID 114)' : 'Ethereum Mainnet';
       const gasCurrency = isCoston2 ? 'C2FLR' : 'ETH';
@@ -1838,7 +1871,8 @@ User message: ${message}`;
         blockchain,
         gasCurrency,
         isCoston2,
-        baseUrl: process.env.BLOCKSCOUT_BASE_URL
+        baseUrl: process.env.BLOCKSCOUT_BASE_URL,
+        chainId: blockchainData.chainId || blockchainData.chain_id
       });
 
       // Convert gas values for proper accounting
@@ -1879,7 +1913,20 @@ BLOCKCHAIN-SPECIFIC RULES:
 3. Gas fees should be recorded as separate journal entries only if > 0.0001 ${gasCurrency}
 4. For token transfers, use token amounts from tokenTransfers data
 5. Ensure all amounts are > 0 and < 1,000,000 for database compatibility
-6. Create specific "Digital Assets - [TOKEN_SYMBOL]" accounts, not generic "Other"`;
+6. Create specific "Digital Assets - [TOKEN_SYMBOL]" accounts, not generic "Other"
+
+CRITICAL ACCOUNT MAPPING FIXES:
+- ETH transfers → "Digital Assets - Ethereum" (NEVER "Digital Assets - Other")
+- C2FLR gas fees → "Digital Assets - C2FLR" 
+- BTC transfers → "Digital Assets - Bitcoin"
+- XYD transfers → "Digital Assets - XYD"
+- Gas fees → "Transaction Fees" (debit account)
+
+AMOUNT VALIDATION:
+- If amount > 100,000: This is likely a Wei conversion error - divide by appropriate decimals
+- ETH amounts should be 0.000001 to 10,000 range
+- Token amounts should match the actual transfer amounts from tokenTransfers data
+- Gas fees in ${gasCurrency} should be 0.00001 to 1.0 range`;
 
       const systemPrompt = ifrsTemplates.systemPrompt;
 
@@ -1906,16 +1953,49 @@ BLOCKCHAIN-SPECIFIC RULES:
       // Validate and filter entries to prevent database constraint violations
       const validEntries = journalEntries.filter(entry => {
         const amount = parseFloat(entry.amount);
-        // Allow smaller amounts for gas fees (0.00001 minimum) but still prevent tiny/invalid amounts
-        const isValid = amount >= 0.00001 && amount < 1000000 && !isNaN(amount); 
+        const currency = entry.currency?.toUpperCase();
+        
+        // Smart validation based on currency type
+        let isValid = false;
+        
+        if (currency === 'ETH') {
+          // ETH should be in reasonable range (0.000001 to 10,000 ETH)
+          isValid = amount >= 0.000001 && amount <= 10000;
+        } else if (currency === 'C2FLR' || currency === 'FLR') {
+          // C2FLR can have larger values but still reasonable
+          isValid = amount >= 0.00001 && amount <= 1000000;
+        } else if (currency === 'BTC') {
+          // BTC in reasonable range
+          isValid = amount >= 0.00000001 && amount <= 1000;
+        } else if (['USDC', 'USDT', 'DAI'].includes(currency)) {
+          // Stablecoins in reasonable range
+          isValid = amount >= 0.01 && amount <= 10000000;
+        } else if (currency === 'XYD') {
+          // XYD token can have larger amounts
+          isValid = amount >= 1 && amount <= 100000000;
+        } else {
+          // Generic token validation
+          isValid = amount >= 0.00001 && amount <= 100000000;
+        }
+        
+        // Additional check for obvious Wei values
+        if (amount > 1000000 && ['ETH', 'C2FLR', 'BTC'].includes(currency)) {
+          isValid = false; // Likely Wei conversion error
+        }
         
         if (!isValid) {
-          logger.warn('Filtering out entry with invalid amount', {
+          logger.warn('Filtering out entry with invalid amount for currency', {
             amount: entry.amount,
             currency: entry.currency,
             debit: entry.accountDebit,
             credit: entry.accountCredit,
-            reason: amount < 0.00001 ? 'too small' : amount >= 1000000 ? 'too large' : 'invalid number',
+            reason: amount > 1000000 ? 'likely Wei conversion error' : 
+                   amount < 0.00001 ? 'too small' : 
+                   amount > 100000000 ? 'too large' : 'invalid range for currency',
+            validRange: currency === 'ETH' ? '0.000001-10,000' :
+                       currency === 'C2FLR' ? '0.00001-1,000,000' :
+                       currency === 'BTC' ? '0.00000001-1,000' :
+                       'varies by token'
           });
         }
         

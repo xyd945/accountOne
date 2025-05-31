@@ -37,16 +37,12 @@ class BlockscoutClient {
       const txData = response.data;
       const normalizedTx = this.normalizeTransactionData(txData);
 
-      // Check if this is a token transfer and enhance with token data
-      if (this.isTokenTransfer(normalizedTx)) {
-        logger.info(`Detected token transfer, fetching token details for ${txid}`);
-        const tokenData = await this.getTokenTransferDetails(txid, normalizedTx.from);
-        if (tokenData) {
-          normalizedTx.tokenTransfer = tokenData;
-          normalizedTx.type = 'token_transfer';
-        }
+      // Determine transaction type based on the normalized data
+      if (normalizedTx.isTokenTransfer) {
+        normalizedTx.type = 'token_transfer';
+        logger.info(`Detected token transfer: ${normalizedTx.tokenTransfer?.tokenAmount} ${normalizedTx.tokenTransfer?.tokenSymbol}`);
       } else if (parseFloat(normalizedTx.value) > 0) {
-        normalizedTx.type = 'eth_transfer';
+        normalizedTx.type = 'native_transfer';
       } else {
         normalizedTx.type = 'contract_interaction';
       }
@@ -226,11 +222,38 @@ class BlockscoutClient {
   async categorizeTransactions(transactions, userAddress) {
     return transactions.map(tx => {
       const category = this.detectTransactionCategory(tx, userAddress);
+      const direction = this.getTransactionDirection(tx, userAddress);
+      
+      // For token transfers, override actualAmount and currency with token data
+      let finalAmount = tx.actualAmount;
+      let currency = tx.networkCurrency || 'ETH';
+      let tokenSymbol = null;
+      
+      if (tx.isTokenTransfer && tx.tokenTransfer) {
+        finalAmount = tx.tokenTransfer.tokenAmount;
+        currency = tx.tokenTransfer.tokenSymbol;
+        tokenSymbol = tx.tokenTransfer.tokenSymbol;
+      } else if (tx.tokenSymbol) {
+        // Legacy token detection
+        finalAmount = tx.actualAmount;
+        currency = tx.tokenSymbol;
+        tokenSymbol = tx.tokenSymbol;
+      }
+      
       return {
         ...tx,
         category,
-        direction: this.getTransactionDirection(tx, userAddress),
-        isUserInitiated: tx.from && tx.from.toLowerCase() === userAddress.toLowerCase()
+        direction,
+        isUserInitiated: tx.from && tx.from.toLowerCase() === userAddress.toLowerCase(),
+        // Override amount and currency for display
+        actualAmount: finalAmount,
+        currency: currency,
+        tokenSymbol: tokenSymbol,
+        // Keep original values for reference
+        nativeAmount: tx.actualAmount,
+        nativeCurrency: tx.networkCurrency || 'ETH',
+        gasFee: tx.gasFee,
+        gasCurrency: tx.networkCurrency || 'ETH'
       };
     });
   }
@@ -246,7 +269,20 @@ class BlockscoutClient {
     const value = parseFloat(tx.actualAmount || tx.value || 0);
 
     // PRIORITY 1: Check if this transaction has token transfer data
-    // If we have token information, prioritize it over ETH value
+    if (tx.isTokenTransfer && tx.tokenTransfer) {
+      const tokenFromAddress = tx.tokenTransfer.from?.toLowerCase();
+      const tokenToAddress = tx.tokenTransfer.to?.toLowerCase();
+      
+      if (tokenFromAddress === lowerAddress) {
+        return 'token_transfer'; // User sent tokens
+      } else if (tokenToAddress === lowerAddress) {
+        return 'token_received'; // User received tokens
+      } else {
+        return 'token_transfer'; // Token transfer involving user
+      }
+    }
+
+    // PRIORITY 2: Legacy token detection for compatibility
     if (tx.tokenSymbol && tx.actualAmount !== undefined) {
       if (fromAddress === lowerAddress) {
         return 'token_transfer'; // User sent tokens
@@ -257,8 +293,7 @@ class BlockscoutClient {
       }
     }
 
-    // PRIORITY 2: Check for token transfer patterns in transaction data
-    // Even if token data isn't attached, look for ERC-20 function signatures
+    // PRIORITY 3: Check for token transfer patterns in transaction data
     if (input.length > 10) {
       const functionSig = input.slice(0, 10);
       
@@ -284,7 +319,7 @@ class BlockscoutClient {
       }
     }
 
-    // PRIORITY 3: Known contract patterns and addresses for categorization
+    // PRIORITY 4: Known contract patterns and addresses for categorization
     const contractPatterns = {
       // Staking patterns
       staking: [
@@ -318,10 +353,13 @@ class BlockscoutClient {
       }
     }
 
-    // PRIORITY 4: Value-based categorization for ETH transfers
-    // Only categorize as ETH transfer if there's meaningful ETH value (> gas fees)
-    // Typical gas fees are < 0.01 ETH, so use 0.01 ETH as threshold
-    if (value > 0.01) { // Only consider significant ETH amounts
+    // PRIORITY 5: Value-based categorization for native currency transfers
+    // Only categorize as native transfer if there's meaningful value (> gas fees)
+    // Use the network currency for proper thresholds
+    const isCoston2 = tx.networkCurrency === 'C2FLR';
+    const minTransferThreshold = isCoston2 ? 0.1 : 0.01; // Higher threshold for C2FLR since it's testnet
+    
+    if (value > minTransferThreshold) {
       if (fromAddress === lowerAddress) {
         return 'outgoing_transfer';
       } else if (toAddress === lowerAddress) {
@@ -329,13 +367,13 @@ class BlockscoutClient {
       }
     }
 
-    // PRIORITY 5: If there's any interaction but small ETH value, likely contract interaction
-    if (input && input.length > 10 && value <= 0.01) {
+    // PRIORITY 6: Contract interaction with small native value
+    if (input && input.length > 10 && value <= minTransferThreshold) {
       return 'contract_interaction';
     }
 
-    // PRIORITY 6: Small ETH value transactions (likely gas fees for failed txs or minimal transfers)
-    if (value > 0 && value <= 0.01) {
+    // PRIORITY 7: Small native value transactions (likely gas fees or minimal transfers)
+    if (value > 0 && value <= minTransferThreshold) {
       if (fromAddress === lowerAddress) {
         return 'outgoing_transfer';
       } else if (toAddress === lowerAddress) {
@@ -572,27 +610,63 @@ class BlockscoutClient {
   }
 
   normalizeTransactionData(txData) {
-    // Convert Wei to ETH for regular transactions (similar to token transfers)
+    // Convert Wei to native currency (C2FLR for Coston2, ETH for Ethereum)
     const rawValue = txData.value?.value || txData.value || '0';
-    const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to ETH
+    const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to native currency
+    
+    // Calculate gas fee properly
+    const gasUsed = parseInt(txData.gas_used || txData.gasUsed || 0);
+    const gasPrice = parseInt(txData.gas_price || txData.gasPrice || 0);
+    const gasFeeWei = gasUsed * gasPrice;
+    const gasFeeNative = gasFeeWei / Math.pow(10, 18); // Convert to native currency
+    
+    // Determine network currency based on base URL
+    const isCoston2 = this.baseURL.includes('coston2');
+    const networkCurrency = isCoston2 ? 'C2FLR' : 'ETH';
+    
+    // Process token transfers if present
+    let tokenTransferData = null;
+    if (txData.token_transfers && txData.token_transfers.length > 0) {
+      const transfer = txData.token_transfers[0]; // Get first token transfer
+      const decimals = parseInt(transfer.token?.decimals || 18);
+      const tokenAmount = parseFloat(transfer.total?.value || 0) / Math.pow(10, decimals);
+      
+      tokenTransferData = {
+        tokenSymbol: transfer.token?.symbol,
+        tokenName: transfer.token?.name,
+        tokenAmount: tokenAmount,
+        tokenContract: transfer.token?.address,
+        from: transfer.from?.hash,
+        to: transfer.to?.hash
+      };
+    }
 
     return {
       hash: txData.hash,
       from: txData.from?.hash || txData.from,
       to: txData.to?.hash || txData.to,
       value: rawValue, // Keep raw Wei value for reference
-      actualAmount: actualValue, // Converted ETH value for calculations
-      gasUsed: txData.gas_used || txData.gasUsed,
-      gasPrice: txData.gas_price || txData.gasPrice,
-      blockNumber: txData.block || txData.blockNumber,
+      actualAmount: actualValue, // Converted native currency value
+      gasUsed: gasUsed,
+      gasPrice: gasPrice,
+      gasFee: gasFeeNative, // Calculated gas fee in native currency
+      gasFeeWei: gasFeeWei, // Raw gas fee in Wei
+      networkCurrency: networkCurrency, // C2FLR or ETH
+      blockNumber: txData.block_number || txData.blockNumber,
       timestamp: new Date(txData.timestamp || parseInt(txData.timeStamp) * 1000),
       status: txData.status === 'ok' || txData.success ? 'success' : 'failed',
       input: txData.raw_input || txData.input,
+      method: txData.method,
       nonce: txData.nonce,
       transactionIndex: txData.position || txData.transactionIndex,
       confirmations: txData.confirmations,
+      
+      // Token transfer data
+      tokenTransfer: tokenTransferData,
+      isTokenTransfer: !!tokenTransferData,
+      
+      // Legacy fields for compatibility
       logs: txData.logs,
-      // Add token information if present
       tokenTransfers: txData.token_transfers || [],
     };
   }

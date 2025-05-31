@@ -3,40 +3,39 @@ const logger = require('../utils/logger');
 
 /**
  * Real FTSO Service using our deployed FtsoPriceConsumer contract
- * Contract address: 0xEc8F86Ffa44FD994A0Fa1971D606e1F37f2d43D2
+ * Contract address: 0xed1692dd816996B8D7EB39e21344B3ed9Fda2d11
  */
 class FTSOService {
   constructor() {
     this.provider = null;
     this.contract = null;
-    this.contractAddress = process.env.FTSO_PRICE_CONSUMER_ADDRESS || '0xEc8F86Ffa44FD994A0Fa1971D606e1F37f2d43D2';
+    this.contractAddress = process.env.FTSO_PRICE_CONSUMER_ADDRESS || '0xed1692dd816996B8D7EB39e21344B3ed9Fda2d11';
     this.enabled = process.env.FTSO_PRICE_CONSUMER_ENABLED === 'true';
     this.priceCache = new Map();
     this.cacheTimeout = parseInt(process.env.PRICE_FEED_CACHE_TTL) || 60000; // 1 minute default
     
-    // Contract ABI - only the methods we need from FtsoPriceConsumer.sol
+    // Contract ABI - updated to match the actual deployed contract
     this.contractABI = [
       {
         "inputs": [{"internalType": "string", "name": "symbol", "type": "string"}],
         "name": "getPrice",
         "outputs": [
-          {"internalType": "uint256", "name": "price", "type": "uint256"},
+          {"internalType": "uint256", "name": "value", "type": "uint256"},
           {"internalType": "int8", "name": "decimals", "type": "int8"},
           {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
         ],
-        "stateMutability": "view",
+        "stateMutability": "nonpayable",
         "type": "function"
       },
       {
         "inputs": [],
         "name": "getAllPrices",
         "outputs": [
-          {"internalType": "string[]", "name": "symbols", "type": "string[]"},
-          {"internalType": "uint256[]", "name": "prices", "type": "uint256[]"},
+          {"internalType": "uint256[]", "name": "feedValues", "type": "uint256[]"},
           {"internalType": "int8[]", "name": "decimals", "type": "int8[]"},
           {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
         ],
-        "stateMutability": "view",
+        "stateMutability": "nonpayable",
         "type": "function"
       },
       {
@@ -50,7 +49,7 @@ class FTSOService {
         "inputs": [],
         "name": "getSupportedSymbols",
         "outputs": [{"internalType": "string[]", "name": "symbols", "type": "string[]"}],
-        "stateMutability": "view",
+        "stateMutability": "pure",
         "type": "function"
       },
       {
@@ -62,10 +61,9 @@ class FTSOService {
         "name": "calculateUSDValue",
         "outputs": [
           {"internalType": "uint256", "name": "usdValue", "type": "uint256"},
-          {"internalType": "uint256", "name": "priceUsed", "type": "uint256"},
-          {"internalType": "uint64", "name": "timestamp", "type": "uint64"}
+          {"internalType": "int8", "name": "priceDecimals", "type": "int8"}
         ],
-        "stateMutability": "view",
+        "stateMutability": "nonpayable",
         "type": "function"
       }
     ];
@@ -102,7 +100,7 @@ class FTSOService {
         return;
       }
 
-      const rpcUrl = process.env.FLARE_RPC_URL || 'https://flare-api.flare.network/ext/C/rpc';
+      const rpcUrl = process.env.FLARE_RPC_URL || 'https://coston2-api.flare.network/ext/C/rpc';
       this.provider = new ethers.JsonRpcProvider(rpcUrl);
 
       // Initialize contract
@@ -119,7 +117,7 @@ class FTSOService {
         contractAddress: this.contractAddress,
         rpcUrl,
         supportedSymbols,
-        chainId: process.env.FLARE_CHAIN_ID || '14',
+        chainId: process.env.FLARE_CHAIN_ID || '114',
         mode: 'real-ftso-contract',
       });
     } catch (error) {
@@ -175,11 +173,11 @@ class FTSOService {
       });
 
       try {
-        // Try to get price from our deployed contract
-        const [price, decimals, timestamp] = await this.contract.getPrice(querySymbol);
+        // Try to get price from our deployed contract using staticCall
+        const [price, decimals, timestamp] = await this.contract.getPrice.staticCall(querySymbol);
         
-        // Convert price to USD (handle decimals)
-        const usdPrice = Number(price) / Math.pow(10, Math.abs(Number(decimals)));
+        // Convert price to USD (handle decimals correctly)
+        const usdPrice = Number(price) / Math.pow(10, Number(decimals));
         
         const priceData = {
           symbol: normalizedSymbol,
@@ -366,7 +364,9 @@ class FTSOService {
       const querySymbol = normalizedSymbol === 'C2FLR' ? 'FLR' : normalizedSymbol;
       
       try {
-        return await this.contract.isSymbolSupported(querySymbol);
+        return await this.contract.isSymbolSupported.staticCall ? 
+          await this.contract.isSymbolSupported.staticCall(querySymbol) :
+          await this.contract.isSymbolSupported(querySymbol);
       } catch (contractError) {
         logger.warn('Failed to check symbol support via contract, checking mock prices', { 
           symbol, 
