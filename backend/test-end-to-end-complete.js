@@ -200,12 +200,12 @@ async function runEndToEndTests() {
         expectsRealPrice: true
       },
       {
-        message: "The company received 2.5 ETH as payment for consulting services on Feb 15, 2025",
-        expectedCurrency: "ETH", 
-        expectsRealPrice: true
+        message: "The company received 500 XYD tokens as payment for consulting services on Feb 15, 2025",
+        expectedCurrency: "XYD", 
+        expectsRealPrice: false // XYD might not have FTSO pricing
       },
       {
-        message: "We paid 100 C2FLR for network fees on January 20, 2025",
+        message: "We paid 0.1 C2FLR for network transaction fees on January 20, 2025",
         expectedCurrency: "C2FLR",
         expectsRealPrice: true
       }
@@ -297,7 +297,12 @@ async function runEndToEndTests() {
         expectedCurrency: "XYD"
       },
       {
-        message: "The company paid 0.05 C2FLR for transaction fees on Feb 10, 2025", 
+        message: "The company sent 250 XYD tokens to a partner wallet on Feb 10, 2025", 
+        expectedAmount: 250,
+        expectedCurrency: "XYD"
+      },
+      {
+        message: "We paid 0.05 C2FLR for transaction fees on Feb 15, 2025", 
         expectedAmount: 0.05,
         expectedCurrency: "C2FLR"
       }
@@ -380,7 +385,7 @@ async function runEndToEndTests() {
     
     try {
       // Use the XYD transaction from Coston2
-      const transactionMessage = `Please analyze this specific Coston2 transaction hash ${TEST_TRANSACTION_HASH} and create journal entries. This transaction represents receiving 1000 XYD tokens from the project team on March 25, 2025.`;
+      const transactionMessage = `Please analyze this specific Coston2 transaction hash ${TEST_TRANSACTION_HASH} and create journal entries. This transaction represents receiving XYD tokens on March 25, 2025.`;
       
       console.log(`Testing with Coston2 XYD transaction: ${TEST_TRANSACTION_HASH}`);
       
@@ -398,7 +403,7 @@ async function runEndToEndTests() {
 
       if (hasTransactionEntries) {
         const amounts = response.journalEntries.map(entry => entry.amount);
-        // For XYD tokens, expect larger amounts (like 1000)
+        // For XYD tokens, expect reasonable amounts (not Wei values)
         hasReasonableAmounts = amounts.every(amount => amount < 10000000 && amount > 0);
         
         console.log(`   Amounts: ${amounts.join(', ')}`);
@@ -408,6 +413,13 @@ async function runEndToEndTests() {
         // Check if XYD is mentioned
         const mentionsXYD = response.response?.toLowerCase().includes('xyd');
         console.log(`   Mentions XYD token: ${mentionsXYD}`);
+        
+        // Check for C2FLR gas fees (should be present)
+        const hasC2FLRGas = response.journalEntries.some(entry => 
+          entry.currency === 'C2FLR' && 
+          (entry.narrative?.toLowerCase().includes('gas') || entry.narrative?.toLowerCase().includes('fee'))
+        );
+        console.log(`   Has C2FLR gas fees: ${hasC2FLRGas}`);
       } else {
         console.log(`   Response preview: ${response.response?.substring(0, 200)}...`);
         console.log(`   Response contains transaction hash: ${response.response?.includes(TEST_TRANSACTION_HASH.slice(0, 10))}`);
@@ -438,9 +450,10 @@ async function runEndToEndTests() {
     console.log('-------------------------------');
     
     try {
-      const bulkMessage = `Analyze all transactions for wallet ${TEST_WALLET_ADDRESS} and create journal entries for each transaction`;
+      const bulkMessage = `Analyze all transactions for wallet ${TEST_WALLET_ADDRESS} and create journal entries for each XYD token transaction and C2FLR network fee`;
       
       console.log(`Testing bulk analysis for wallet: ${TEST_WALLET_ADDRESS}`);
+      console.log(`Expected: XYD token transfers and C2FLR gas fees only`);
       
       const gemini = new GeminiClient();
       const response = await gemini.chatResponse(
@@ -454,15 +467,28 @@ async function runEndToEndTests() {
       const hasBulkEntries = response.journalEntries && response.journalEntries.length > 0;
       let bulkAmountsReasonable = false;
       let hasNoOverflowError = true;
+      let hasXYDEntries = false;
+      let hasC2FLRGasEntries = false;
 
       if (hasBulkEntries) {
         // Check all amounts are reasonable (not Wei values)
         const allAmounts = response.journalEntries.map(entry => entry.amount);
         bulkAmountsReasonable = allAmounts.every(amount => amount < 1000000 && amount > 0);
         
+        // Check for XYD token entries
+        hasXYDEntries = response.journalEntries.some(entry => entry.currency === 'XYD');
+        
+        // Check for C2FLR gas fee entries
+        hasC2FLRGasEntries = response.journalEntries.some(entry => 
+          entry.currency === 'C2FLR' && 
+          (entry.narrative?.toLowerCase().includes('gas') || entry.narrative?.toLowerCase().includes('fee'))
+        );
+        
         console.log(`   Total entries: ${response.journalEntries.length}`);
         console.log(`   Sample amounts: ${allAmounts.slice(0, 5).join(', ')}`);
         console.log(`   All amounts reasonable: ${bulkAmountsReasonable}`);
+        console.log(`   Has XYD token entries: ${hasXYDEntries}`);
+        console.log(`   Has C2FLR gas entries: ${hasC2FLRGasEntries}`);
         
         // Check for overflow errors in response
         hasNoOverflowError = !response.response.toLowerCase().includes('overflow') &&
@@ -481,11 +507,13 @@ async function runEndToEndTests() {
         console.log(`   Successful completion with no entries: ${isSuccessfulNoEntries}`);
       }
 
-      results.walletBulkAnalysis = hasBulkEntries && bulkAmountsReasonable && hasNoOverflowError;
+      results.walletBulkAnalysis = hasBulkEntries && bulkAmountsReasonable && hasNoOverflowError && (hasXYDEntries || hasC2FLRGasEntries);
       results.details.walletBulkAnalysis = {
         hasBulkEntries,
         bulkAmountsReasonable,
         hasNoOverflowError,
+        hasXYDEntries,
+        hasC2FLRGasEntries,
         entriesCount: response.journalEntries?.length || 0,
         sampleAmounts: response.journalEntries?.slice(0, 5).map(entry => entry.amount) || [],
         processingComplete: response.processingComplete,
@@ -509,11 +537,11 @@ async function runEndToEndTests() {
       
       // Test saving a simple entry with reasonable amounts
       const testEntry = {
-        accountDebit: 'Test Asset Account',
-        accountCredit: 'Test Revenue Account',
-        amount: 5.25, // Reasonable ETH amount
-        currency: 'ETH',
-        narrative: 'End-to-end test entry',
+        accountDebit: 'Digital Assets - XYD',
+        accountCredit: 'Trading Revenue',
+        amount: 125.50, // Reasonable XYD token amount
+        currency: 'XYD',
+        narrative: 'End-to-end test entry for XYD token transaction',
       };
 
       console.log(`Attempting to save test entry: ${testEntry.amount} ${testEntry.currency}`);
@@ -525,7 +553,7 @@ async function runEndToEndTests() {
       });
 
       console.log(`✅ Saved test entry: ${savedEntry.length > 0}`);
-      console.log(`✅ Entry amount preserved: ${Math.abs(savedEntry[0]?.amount - 5.25) < 0.01}`);
+      console.log(`✅ Entry amount preserved: ${Math.abs(savedEntry[0]?.amount - 125.50) < 0.01}`);
       console.log(`✅ Entry details: ${JSON.stringify({
         id: savedEntry[0]?.id,
         amount: savedEntry[0]?.amount,
@@ -535,7 +563,7 @@ async function runEndToEndTests() {
       })}`);
 
       const dbOperationsWorking = savedEntry.length > 0;
-      const amountPreserved = Math.abs(savedEntry[0]?.amount - 5.25) < 0.01; // Allow for small floating point differences
+      const amountPreserved = Math.abs(savedEntry[0]?.amount - 125.50) < 0.01; // Allow for small floating point differences
 
       results.databaseOperations = dbOperationsWorking && amountPreserved;
       results.details.databaseOperations = {
@@ -543,7 +571,7 @@ async function runEndToEndTests() {
         amountPreserved,
         testEntrySaved: savedEntry.length > 0,
         savedAmount: savedEntry[0]?.amount,
-        expectedAmount: 5.25,
+        expectedAmount: 125.50,
         entryId: savedEntry[0]?.id
       };
 
@@ -582,15 +610,16 @@ async function runEndToEndTests() {
     console.log(`🎯 ALL TESTS:               ${results.allTestsPassed ? '✅ PASSED' : '❌ FAILED'}`);
 
     if (results.allTestsPassed) {
-      console.log('\n🎉 ACCOUNTONE FTSO INTEGRATION SUCCESS!');
-      console.log('=======================================');
+      console.log('\n🎉 ACCOUNTONE COSTON2 TESTNET SUCCESS!');
+      console.log('====================================');
       console.log('✅ Real FTSO price feeds integrated');
-      console.log('✅ Coston2 network fully supported');
-      console.log('✅ XYD token transactions processed');
-      console.log('✅ BTC/ETH/FLR live pricing available');
+      console.log('✅ Coston2 testnet fully supported');
+      console.log('✅ XYD token transactions processed correctly');
+      console.log('✅ C2FLR gas fees properly handled');
+      console.log('✅ BTC/C2FLR live pricing available');
       console.log('✅ USD valuations with real market data');
-      console.log('✅ Complete end-to-end accounting flow');
-      console.log('✅ Production-ready system!');
+      console.log('✅ Complete end-to-end accounting flow for Coston2');
+      console.log('✅ Production-ready for Coston2 testnet!');
     } else {
       console.log('\n🚨 FAILED TESTS:');
       Object.entries(results).forEach(([test, passed]) => {

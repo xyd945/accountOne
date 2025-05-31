@@ -366,6 +366,63 @@ class GeminiClient {
 
     // Calculate category summary
     const categorySummary = this.calculateCategorySummary(transactions, category);
+    
+    // Detect blockchain network based on environment or transaction data
+    const isCoston2 = process.env.BLOCKSCOUT_BASE_URL?.includes('coston2') || 
+                      process.env.FLARE_CHAIN_ID === '114';
+    
+    const blockchain = isCoston2 ? 'Coston2 (Chain ID 114)' : 'Ethereum Mainnet';
+    const gasCurrency = isCoston2 ? 'C2FLR' : 'ETH';
+    const gasAccount = isCoston2 ? 'Digital Assets - C2FLR' : 'Digital Assets - Ethereum';
+    
+    // Extract actual token symbols from the transactions for this category
+    const actualTokens = new Set();
+    transactions.forEach(tx => {
+      if (tx.tokenSymbol) {
+        actualTokens.add(tx.tokenSymbol);
+      }
+    });
+    const tokensInCategory = Array.from(actualTokens);
+    
+    // Add network-specific rules to the prompt
+    const networkRules = `
+**CRITICAL NETWORK DETECTION:**
+- Network: ${blockchain}
+- Gas Currency: ${gasCurrency} (NEVER use "GAS" as currency)
+- Gas Account Mapping: Debit "Transaction Fees", Credit "${gasAccount}"
+- Base URL: ${process.env.BLOCKSCOUT_BASE_URL || 'not set'}
+- Chain ID: ${process.env.FLARE_CHAIN_ID || 'not set'}
+
+**MANDATORY GAS FEE RULES:**
+1. For ALL gas fee entries on ${blockchain}:
+   - Currency: "${gasCurrency}" (NOT "GAS", NOT "ETH" on Coston2)
+   - Debit Account: "Transaction Fees"
+   - Credit Account: "${gasAccount}"
+   - Amount Range: 0.00001 to 1.0 ${gasCurrency}
+2. Gas amounts > 100,000 are Wei conversion errors - divide by 10^18
+3. NEVER use "Bank Account - Crypto Exchange" for gas fees
+
+**CRITICAL TOKEN CURRENCY RULES FOR ${category.toUpperCase()}:**
+${tokensInCategory.length > 0 ? `
+⚠️ DETECTED TOKENS IN THIS CATEGORY: ${tokensInCategory.join(', ')}
+🚨 MANDATORY: Use the EXACT token symbols shown above as currencies!
+🚨 DO NOT use "ETH" for token transfers - use the actual token symbol!
+
+For each token detected:
+${tokensInCategory.map(token => `- ${token} amounts → Currency: "${token}", Account: "Digital Assets - ${token}"`).join('\n')}
+` : ''}
+
+**ACCOUNT MAPPING FOR ${blockchain}:**
+- ETH amounts → "Digital Assets - Ethereum" 
+- C2FLR amounts → "Digital Assets - C2FLR"
+- XYD amounts → "Digital Assets - XYD"
+- BTC amounts → "Digital Assets - Bitcoin"
+- Gas fees → "Transaction Fees" (debit) + "${gasAccount}" (credit)
+
+**EXAMPLES FOR THIS CATEGORY (${category}):**
+${tokensInCategory.length > 0 ? tokensInCategory.map(token => 
+`- ${token} Token Transfer: Currency="${token}", Debit="Digital Assets - ${token}", Credit="[appropriate counterpart]"`
+).join('\n') : 'No tokens detected - use network native currency'}`;
 
     return ifrsTemplates.bulkTransactionAnalysisPrompt
       .replace('{walletAddress}', walletAddress)
@@ -375,7 +432,7 @@ class GeminiClient {
       .replace('{volumeSummary}', JSON.stringify(categorySummary))
       .replace('{categoryBreakdown}', this.formatCategoryBreakdown(category, categoryTemplate))
       .replace('{transactions}', this.formatTransactionsForPrompt(transactions))
-      .replace('{chartOfAccounts}', chartOfAccounts);
+      .replace('{chartOfAccounts}', chartOfAccounts + '\n' + networkRules);
   }
 
   /**
@@ -383,16 +440,40 @@ class GeminiClient {
    */
   formatTransactionsForPrompt(transactions) {
     return transactions.map((tx, index) => {
-      return `${index + 1}. Hash: ${tx.hash}
+      // Emphasize token information for the AI
+      const isTokenTransfer = tx.tokenSymbol && tx.tokenSymbol !== 'ETH' && tx.tokenSymbol !== 'C2FLR';
+      const currency = tx.tokenSymbol || 'C2FLR'; // Default to C2FLR for Coston2, not ETH
+      const amount = tx.actualAmount || tx.value || 0;
+      
+      let transactionDescription = `${index + 1}. Hash: ${tx.hash}
    From: ${tx.from}
    To: ${tx.to}
-   Value: ${tx.actualAmount || tx.value || 0} ${tx.tokenSymbol || 'ETH'}
    Category: ${tx.category}
    Direction: ${tx.direction}
    Timestamp: ${tx.timestamp}
-   Gas Used: ${tx.gasUsed || 'N/A'}
-   ${tx.tokenSymbol ? `Token: ${tx.tokenSymbol} (${tx.actualAmount})` : ''}
-   ${tx.input && tx.input.length > 10 ? `Function: ${tx.input.slice(0, 10)}` : ''}`;
+   Gas Used: ${tx.gasUsed || 'N/A'}`;
+
+      if (isTokenTransfer) {
+        // For token transfers, make it very explicit
+        transactionDescription += `
+   
+   🟢 TOKEN TRANSFER DETECTED:
+   ➤ Token Symbol: ${tx.tokenSymbol} 
+   ➤ Token Amount: ${amount} ${tx.tokenSymbol}
+   ➤ IMPORTANT: Use "${tx.tokenSymbol}" as currency, NOT "ETH"
+   ➤ Account: "Digital Assets - ${tx.tokenSymbol}"`;
+      } else {
+        // For native currency transactions
+        transactionDescription += `
+   Value: ${amount} ${currency}
+   ${currency === 'C2FLR' ? '(Native Coston2 currency)' : '(Native currency)'}`;
+      }
+      
+      if (tx.input && tx.input.length > 10) {
+        transactionDescription += `\n   Function: ${tx.input.slice(0, 10)}`;
+      }
+      
+      return transactionDescription;
     }).join('\n\n');
   }
 
@@ -582,16 +663,78 @@ IFRS Notes: ${template.ifrsNotes}`;
         entryGroupsCount: journalEntries.length,
       });
 
+      // Detect network for proper gas currency conversion
+      const isCoston2 = process.env.BLOCKSCOUT_BASE_URL?.includes('coston2') || 
+                        process.env.FLARE_CHAIN_ID === '114';
+      const correctGasCurrency = isCoston2 ? 'C2FLR' : 'ETH';
+      const correctGasAccount = isCoston2 ? 'Digital Assets - C2FLR' : 'Digital Assets - Ethereum';
+
       // Flatten the nested structure into individual entries
       const flattenedEntries = [];
       
       for (const entryGroup of journalEntries) {
         for (const entry of entryGroup.entries) {
-          const amount = parseFloat(entry.amount);
+          let amount = parseFloat(entry.amount);
+          let currency = entry.currency?.toUpperCase();
+          let accountCredit = entry.accountCredit;
+          let accountDebit = entry.accountDebit;
           
-          // Filter out invalid amounts to prevent database constraint violations
-          // Use currency-aware validation
-          const currency = entry.currency?.toUpperCase();
+          // Fix GAS currency issues
+          if (currency === 'GAS' || currency?.includes('GAS')) {
+            logger.info('Converting GAS currency to proper network currency', {
+              originalCurrency: currency,
+              originalAmount: amount,
+              networkCurrency: correctGasCurrency,
+              transactionHash: entryGroup.transactionHash
+            });
+            
+            currency = correctGasCurrency;
+            entry.currency = correctGasCurrency;
+            
+            // Also fix the account if it's using wrong account for gas fees
+            if (accountCredit?.includes('Bank Account') || accountCredit?.includes('Crypto Exchange')) {
+              accountCredit = correctGasAccount;
+              entry.accountCredit = correctGasAccount;
+              
+              logger.info('Fixed gas fee account mapping', {
+                originalCredit: entry.accountCredit,
+                newCredit: correctGasAccount,
+                transactionHash: entryGroup.transactionHash
+              });
+            }
+          }
+          
+          // Fix Wei conversion errors (amounts > 100,000 for crypto currencies)
+          if (amount > 100000 && ['ETH', 'C2FLR', 'BTC'].includes(currency)) {
+            const originalAmount = amount;
+            amount = amount / Math.pow(10, 18); // Convert Wei to base units
+            
+            logger.info('Fixed Wei conversion error', {
+              originalAmount,
+              convertedAmount: amount,
+              currency,
+              transactionHash: entryGroup.transactionHash
+            });
+          }
+          
+          // Fix account naming for specific currencies
+          if (currency === 'ETH' && accountCredit?.includes('Other')) {
+            accountCredit = 'Digital Assets - Ethereum';
+            entry.accountCredit = accountCredit;
+          } else if (currency === 'ETH' && accountDebit?.includes('Other')) {
+            accountDebit = 'Digital Assets - Ethereum';  
+            entry.accountDebit = accountDebit;
+          }
+          
+          if (currency === 'XYD' && accountCredit?.includes('Other')) {
+            accountCredit = 'Digital Assets - XYD';
+            entry.accountCredit = accountCredit;
+          } else if (currency === 'XYD' && accountDebit?.includes('Other')) {
+            accountDebit = 'Digital Assets - XYD';
+            entry.accountDebit = accountDebit;
+          }
+          
+          // Validate amounts based on currency
           let isValid = false;
           
           if (currency === 'ETH') {
@@ -604,42 +747,32 @@ IFRS Notes: ${template.ifrsNotes}`;
             isValid = amount >= 0.01 && amount <= 10000000;
           } else if (currency === 'XYD') {
             isValid = amount >= 1 && amount <= 100000000;
-          } else if (currency?.includes('Gas') || currency?.includes('gas')) {
-            // Handle gas amounts - convert to proper currency
-            const actualCurrency = entry.accountCredit?.includes('C2FLR') || 
-                                 process.env.FLARE_CHAIN_ID === '114' ? 'C2FLR' : 'ETH';
-            entry.currency = actualCurrency; // Fix the currency
-            isValid = amount >= 0.00001 && amount <= 100; // Gas fees range
           } else {
             // Generic token validation
             isValid = amount >= 0.00001 && amount <= 100000000;
           }
           
-          // Additional Wei check
-          if (amount > 1000000 && ['ETH', 'C2FLR', 'BTC'].includes(currency)) {
-            isValid = false;
-          }
-          
           if (!isValid) {
             logger.warn('Skipping entry with invalid amount', {
               amount: entry.amount,
-              currency: entry.currency,
-              debit: entry.accountDebit,
-              credit: entry.accountCredit,
+              convertedAmount: amount,
+              currency: currency,
+              debit: accountDebit,
+              credit: accountCredit,
               transactionHash: entryGroup.transactionHash,
-              reason: amount > 1000000 ? 'likely Wei conversion error' : 
+              reason: amount > 100000000 ? 'too large' : 
                      amount < 0.00001 ? 'too small' : 
-                     amount > 100000000 ? 'too large' : 'invalid range for currency',
+                     'invalid range for currency',
             });
             continue; // Skip this entry
           }
           
           // Add transaction context to each entry
           flattenedEntries.push({
-            accountDebit: entry.accountDebit,
-            accountCredit: entry.accountCredit,
-            amount: amount, // Use the validated amount
-            currency: entry.currency,
+            accountDebit: accountDebit,
+            accountCredit: accountCredit,
+            amount: amount, // Use the corrected amount
+            currency: currency, // Use the corrected currency
             narrative: `${entry.narrative} (Bulk analysis from ${walletAddress})`,
             confidence: entry.confidence || 0.8,
             entryType: entry.entryType || 'main',
@@ -652,6 +785,12 @@ IFRS Notes: ${template.ifrsNotes}`;
               bulkAnalysis: true,
               requiresAccountCreation: entry.requiresAccountCreation || false,
               accountCreationSuggestions: entry.accountCreationSuggestions || null,
+              corrections: {
+                originalCurrency: entry.currency,
+                originalAmount: entry.amount,
+                weiConversionApplied: amount !== parseFloat(entry.amount),
+                gasAccountFixed: accountCredit !== entry.accountCredit
+              }
             },
           });
         }
@@ -688,6 +827,8 @@ IFRS Notes: ${template.ifrsNotes}`;
           bulkAnalysis: true,
           analysisTimestamp: new Date().toISOString(),
           totalTransactionGroups: journalEntries.length,
+          networkDetected: isCoston2 ? 'Coston2' : 'Ethereum',
+          gassCurrency: correctGasCurrency,
         },
       });
 
