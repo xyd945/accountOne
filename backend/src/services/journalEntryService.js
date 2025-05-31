@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const logger = require('../utils/logger');
+const ftsoService = require('./ftsoService'); // Add FTSO service import
 
 class JournalEntryService {
   constructor() {
@@ -27,7 +28,7 @@ class JournalEntryService {
     metadata = null 
   }) {
     try {
-      logger.info('Saving journal entries', {
+      logger.info('Saving journal entries with USD enhancement', {
         userId,
         entriesCount: entries.length,
         source,
@@ -82,20 +83,37 @@ class JournalEntryService {
         }
       }
 
-      // Prepare journal entry records - just save what AI gives us
-      const journalEntryRecords = entries.map(entry => ({
+      // **NEW: Enhance entries with USD values using FTSO service**
+      const enhancedEntries = await this.enhanceEntriesWithUSDValues(entries);
+
+      // Prepare journal entry records - now with USD values in dedicated columns
+      const journalEntryRecords = enhancedEntries.map(entry => ({
         user_id: userId,
         transaction_id: finalTransactionId,
         account_debit: entry.accountDebit || entry.account_debit,
         account_credit: entry.accountCredit || entry.account_credit,
         amount: Math.abs(parseFloat(entry.amount)), // Ensure positive amount
         currency: entry.currency || 'USD',
-        narrative: entry.narrative || entry.description || 'AI-generated entry',
+        // **NEW: Populate dedicated USD columns**
+        usd_value: entry.usdValue || null,
+        usd_rate: entry.ftsoPrice || entry.exchangeRate || null,
+        usd_source: entry.ftsoSource || entry.priceSource || null,
+        usd_timestamp: entry.ftsoTimestamp || (entry.usdValue ? new Date().toISOString() : null),
+        // Enhanced narrative with USD value if available
+        narrative: entry.enhancedNarrative || entry.narrative || entry.description || 'AI-generated entry',
         entry_date: entry.entryDate || entry.entry_date || new Date().toISOString().split('T')[0],
         ai_confidence: entry.confidence || entry.ai_confidence || (source === 'ai' ? 0.8 : null),
         is_reviewed: false,
         source: source === 'ai' ? 'ai_chat' : source,
-        metadata: metadata ? JSON.stringify(metadata) : null,
+        // Keep some USD info in metadata for backward compatibility
+        metadata: JSON.stringify({
+          ...metadata,
+          originalNarrative: entry.narrative || entry.description,
+          ftsoEnhanced: !!entry.ftsoEnhanced,
+          // Keep legacy fields for compatibility
+          usdValue: entry.usdValue || null,
+          usdValueFormatted: entry.usdValueFormatted || null
+        }),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         transaction_date: transactionDate,
@@ -119,6 +137,11 @@ class JournalEntryService {
           created_at,
           updated_at,
           transaction_date,
+          metadata,
+          usd_value,
+          usd_rate,
+          usd_source,
+          usd_timestamp,
           transactions(txid, description)
         `);
 
@@ -131,10 +154,16 @@ class JournalEntryService {
         throw new Error(`Failed to save journal entries: ${error.message}`);
       }
 
-      logger.info('Successfully saved journal entries', {
+      logger.info('Successfully saved journal entries with USD enhancement', {
         userId,
         savedCount: savedEntries.length,
         source,
+        usdEnhanced: savedEntries.filter(e => {
+          try {
+            const metadata = JSON.parse(e.metadata || '{}');
+            return metadata.ftsoEnhanced;
+          } catch { return false; }
+        }).length
       });
 
       return savedEntries;
@@ -146,6 +175,104 @@ class JournalEntryService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Enhance journal entries with USD values using FTSO service
+   * @param {Array} entries - Original journal entries
+   * @returns {Array} Enhanced entries with USD values
+   */
+  async enhanceEntriesWithUSDValues(entries) {
+    const enhancedEntries = [];
+
+    for (const entry of entries) {
+      let enhancedEntry = { ...entry };
+      
+      try {
+        // Only enhance if we have a valid currency and amount
+        if (entry.currency && entry.amount && parseFloat(entry.amount) > 0) {
+          logger.info('Attempting FTSO enhancement for entry', {
+            currency: entry.currency,
+            amount: entry.amount
+          });
+
+          const ftsoData = await ftsoService.getPriceForJournalEntry(
+            entry.currency, 
+            parseFloat(entry.amount)
+          );
+
+          if (ftsoData.supported && ftsoData.usdValue) {
+            // Add USD enhancement data to the entry
+            enhancedEntry = {
+              ...entry,
+              // Add USD value fields
+              usdValue: ftsoData.usdValue,
+              usdValueFormatted: ftsoData.usdValueFormatted,
+              ftsoPrice: ftsoData.priceData?.usdPrice,
+              ftsoSource: ftsoData.source,
+              ftsoSupported: true,
+              ftsoEnhanced: true,
+              // Enhanced narrative with USD value
+              enhancedNarrative: ftsoData.enhancedNarrative,
+              // Keep original narrative
+              originalNarrative: entry.narrative || entry.description
+            };
+
+            logger.info('Successfully enhanced entry with USD value', {
+              currency: entry.currency,
+              amount: entry.amount,
+              usdValue: ftsoData.usdValueFormatted,
+              price: ftsoData.priceData?.usdPrice,
+              source: ftsoData.source
+            });
+          } else {
+            // Mark as unsupported but don't fail
+            enhancedEntry = {
+              ...entry,
+              ftsoSupported: false,
+              ftsoEnhanced: false,
+              ftsoError: ftsoData.error || 'Currency not supported by FTSO'
+            };
+
+            logger.info('FTSO enhancement not available for currency', {
+              currency: entry.currency,
+              reason: ftsoData.error || 'not supported'
+            });
+          }
+        } else {
+          // Skip enhancement for entries without valid currency/amount
+          enhancedEntry = {
+            ...entry,
+            ftsoEnhanced: false,
+            ftsoSkipped: true
+          };
+        }
+      } catch (error) {
+        logger.warn('Failed to enhance entry with USD value', {
+          currency: entry.currency,
+          amount: entry.amount,
+          error: error.message
+        });
+        
+        // Keep original entry but mark enhancement failure
+        enhancedEntry = {
+          ...entry,
+          ftsoEnhanced: false,
+          ftsoError: error.message
+        };
+      }
+
+      enhancedEntries.push(enhancedEntry);
+    }
+
+    const enhancedCount = enhancedEntries.filter(e => e.ftsoEnhanced).length;
+    logger.info('USD enhancement completed', {
+      totalEntries: entries.length,
+      enhancedCount,
+      enhancementRate: `${((enhancedCount / entries.length) * 100).toFixed(1)}%`
+    });
+
+    return enhancedEntries;
   }
 
   /**

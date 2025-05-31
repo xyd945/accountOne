@@ -863,7 +863,13 @@ router.get('/:id', async (req, res, next) => {
     // Get journal entries
     const { data: journalEntries, error: entriesError } = await supabase
       .from('journal_entries')
-      .select('*')
+      .select(`
+        *,
+        usd_value,
+        usd_rate,
+        usd_source,
+        usd_timestamp
+      `)
       .eq('transaction_id', id)
       .order('created_at', { ascending: true });
 

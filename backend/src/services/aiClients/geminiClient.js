@@ -1320,9 +1320,17 @@ IFRS Notes: ${template.ifrsNotes}`;
               // Nested entry group structure
               response += `**${index + 1}. ${entryItem.category?.toUpperCase() || 'TRANSACTION'}**\n`;
               entryItem.entries.forEach((entry, entryIndex) => {
-                response += `• Debit: ${entry.accountDebit} (${entry.amount} ${entry.currency})\n`;
-                response += `• Credit: ${entry.accountCredit}\n`;
-                response += `• Narrative: ${entry.narrative}\n`;
+                response += `• Debit: ${entry.accountDebit} - ${entry.currency} ${entry.amount}\n`;
+                response += `• Credit: ${entry.accountCredit} - ${entry.currency} ${entry.amount}\n`;
+                
+                // **UPDATED: Show USD values from database columns**
+                if (entry.usd_value && entry.usd_source) {
+                  response += `• USD Value: $${entry.usd_value.toFixed(2)} (${entry.usd_source})\n`;
+                } else if (entry.usdValueFormatted) {
+                  response += `• USD Value: $${entry.usdValueFormatted} (${entry.ftsoSource || 'FTSO'})\n`;
+                }
+                
+                if (entry.narrative) response += `• Description: ${entry.narrative}\n`;
                 if (entryIndex < entryItem.entries.length - 1) response += `\n`;
               });
             } else {
@@ -1331,6 +1339,20 @@ IFRS Notes: ${template.ifrsNotes}`;
               response += `• Debit: ${entryItem.accountDebit} (${entryItem.amount} ${entryItem.currency})\n`;
               response += `• Credit: ${entryItem.accountCredit}\n`;
               response += `• Narrative: ${entryItem.narrative}\n`;
+              
+              // Add USD value if available (check both direct property and metadata)
+              if (entryItem.usdValueFormatted) {
+                response += `• USD Value: $${entryItem.usdValueFormatted} (via ${entryItem.ftsoSource || 'FTSO'})\n`;
+              } else if (entryItem.metadata) {
+                try {
+                  const metadata = typeof entryItem.metadata === 'string' ? JSON.parse(entryItem.metadata) : entryItem.metadata;
+                  if (metadata.usdValueFormatted) {
+                    response += `• USD Value: $${metadata.usdValueFormatted} (via ${metadata.ftsoSource || 'FTSO'})\n`;
+                  }
+                } catch (e) {
+                  // Ignore metadata parsing errors
+                }
+              }
             }
             if (index < 2 && index < entriesToShow.length - 1) response += `\n---\n\n`;
           });
@@ -2083,13 +2105,37 @@ User message: ${message}`;
   }
 
   formatJournalEntriesForChat(journalEntries) {
-    return journalEntries.map((entry, index) =>
-      `Entry ${index + 1}:
-- Debit: ${entry.accountDebit} - ${entry.currency} ${entry.amount}
-- Credit: ${entry.accountCredit} - ${entry.currency} ${entry.amount}
-- Description: ${entry.description || entry.narrative || 'N/A'}
-- Confidence: ${entry.confidence ? `${(entry.confidence * 100).toFixed(1)}%` : 'N/A'}`,
-    ).join('\n\n');
+    return journalEntries.map((entry, index) => {
+      let entryText = `Entry ${index + 1}:\n- Debit: ${entry.accountDebit} - ${entry.currency} ${entry.amount}\n- Credit: ${entry.accountCredit} - ${entry.currency} ${entry.amount}\n- Description: ${entry.description || entry.narrative || 'N/A'}\n- Confidence: ${entry.confidence ? `${(entry.confidence * 100).toFixed(1)}%` : 'N/A'}`;
+
+      // **UPDATED: Prioritize USD values from database columns**
+      if (entry.usd_value && entry.usd_source) {
+        // Use USD values from dedicated database columns
+        entryText += `\n- USD Value: $${entry.usd_value.toFixed(2)} (via ${entry.usd_source})`;
+        if (entry.usd_rate) {
+          entryText += `\n- Exchange Rate: ${entry.usd_rate.toFixed(4)} ${entry.currency}/USD`;
+        }
+        if (entry.usd_timestamp) {
+          const date = new Date(entry.usd_timestamp);
+          entryText += `\n- Price Time: ${date.toLocaleString()}`;
+        }
+      } else if (entry.usdValueFormatted) {
+        // Fallback to legacy format for backward compatibility
+        entryText += `\n- USD Value: $${entry.usdValueFormatted} (via ${entry.ftsoSource || 'FTSO'})`;
+      } else if (entry.metadata) {
+        // Check if USD value is in metadata (for old saved entries)
+        try {
+          const metadata = typeof entry.metadata === 'string' ? JSON.parse(entry.metadata) : entry.metadata;
+          if (metadata.usdValue) {
+            entryText += `\n- USD Value: $${metadata.usdValueFormatted || metadata.usdValue.toFixed(2)} (via ${metadata.ftsoSource || 'FTSO'})`;
+          }
+        } catch (error) {
+          // Ignore metadata parsing errors
+        }
+      }
+
+      return entryText;
+    }).join('\n\n');
   }
 
   extractThinking(response) {
