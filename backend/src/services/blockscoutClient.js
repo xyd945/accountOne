@@ -31,19 +31,10 @@ class BlockscoutClient {
     try {
       logger.info(`Fetching transaction info for txid: ${txid}`);
 
-      const response = await this.client.get('/api', {
-        params: {
-          module: 'transaction',
-          action: 'gettxinfo',
-          txhash: txid,
-        },
-      });
+      // Use v2 API format for Coston2 Blockscout
+      const response = await this.client.get(`/api/v2/transactions/${txid}`);
 
-      if (response.data.status !== '1') {
-        throw new AppError(`Transaction not found: ${txid}`, 404);
-      }
-
-      const txData = response.data.result;
+      const txData = response.data;
       const normalizedTx = this.normalizeTransactionData(txData);
 
       // Check if this is a token transfer and enhance with token data
@@ -62,8 +53,8 @@ class BlockscoutClient {
 
       return normalizedTx;
     } catch (error) {
-      if (error instanceof AppError) {
-        throw error;
+      if (error.response?.status === 404) {
+        throw new AppError(`Transaction not found: ${txid}`, 404);
       }
 
       logger.error('Error fetching transaction info', {
@@ -158,28 +149,21 @@ class BlockscoutClient {
     const { startBlock, endBlock, page, offset, sort, includeFailed } = options;
 
     try {
-      const response = await this.client.get('/api', {
+      // Use v2 API format: /api/v2/addresses/{address}/transactions
+      const response = await this.client.get(`/api/v2/addresses/${address}/transactions`, {
         params: {
-          module: 'account',
-          action: 'txlist',
-          address,
-          startblock: startBlock,
-          endblock: endBlock,
+          filter: 'to|from', // Get both incoming and outgoing transactions
+          type: 'transaction', // Regular transactions only
           page,
-          offset,
-          sort,
+          limit: offset,
         },
       });
 
-      if (response.data.status !== '1') {
-        return [];
-      }
-
-      let transactions = response.data.result || [];
+      let transactions = response.data.items || [];
       
       // Filter out failed transactions if not requested
       if (!includeFailed) {
-        transactions = transactions.filter(tx => tx.isError === '0');
+        transactions = transactions.filter(tx => tx.status === 'ok');
       }
 
       return transactions.map(tx => this.normalizeTransactionData(tx));
@@ -196,24 +180,17 @@ class BlockscoutClient {
     const { startBlock, endBlock, page, offset, sort } = options;
 
     try {
-      const response = await this.client.get('/api', {
+      // Use v2 API format: /api/v2/addresses/{address}/token-transfers
+      const response = await this.client.get(`/api/v2/addresses/${address}/token-transfers`, {
         params: {
-          module: 'account',
-          action: 'tokentx',
-          address,
-          startblock: startBlock,
-          endblock: endBlock,
+          type: 'ERC-20,ERC-721,ERC-1155', // All token types
           page,
-          offset,
-          sort,
+          limit: offset,
         },
       });
 
-      if (response.data.status !== '1') {
-        return [];
-      }
-
-      return response.data.result.map(tx => this.normalizeTokenTransfer(tx));
+      const transfers = response.data.items || [];
+      return transfers.map(tx => this.normalizeTokenTransfer(tx));
     } catch (error) {
       logger.warn('Failed to fetch token transactions', { address, error: error.message });
       return [];
@@ -227,24 +204,16 @@ class BlockscoutClient {
     const { startBlock, endBlock, page, offset, sort } = options;
 
     try {
-      const response = await this.client.get('/api', {
+      // Use v2 API format: /api/v2/addresses/{address}/internal-transactions
+      const response = await this.client.get(`/api/v2/addresses/${address}/internal-transactions`, {
         params: {
-          module: 'account',
-          action: 'txlistinternal',
-          address,
-          startblock: startBlock,
-          endblock: endBlock,
           page,
-          offset,
-          sort,
+          limit: offset,
         },
       });
 
-      if (response.data.status !== '1') {
-        return [];
-      }
-
-      return response.data.result.map(tx => this.normalizeInternalTransaction(tx));
+      const internalTxs = response.data.items || [];
+      return internalTxs.map(tx => this.normalizeInternalTransaction(tx));
     } catch (error) {
       logger.warn('Failed to fetch internal transactions', { address, error: error.message });
       return [];
@@ -551,23 +520,14 @@ class BlockscoutClient {
 
   async getTokenTransferDetails(txHash, fromAddress) {
     try {
-      // Get token transfers for the sender address around the transaction block
-      const response = await this.client.get('/api', {
-        params: {
-          module: 'account',
-          action: 'tokentx',
-          address: fromAddress,
-          sort: 'desc',
-        },
-      });
+      // Use v2 API format: get transaction details directly
+      const response = await this.client.get(`/api/v2/transactions/${txHash}/token-transfers`);
 
-      if (response.data.status !== '1') {
-        return null;
-      }
-
-      // Find the specific transaction
-      const tokenTransfer = response.data.result.find(
-        transfer => transfer.hash.toLowerCase() === txHash.toLowerCase()
+      const tokenTransfers = response.data.items || [];
+      
+      // Find the transfer that matches our criteria
+      const tokenTransfer = tokenTransfers.find(
+        transfer => (transfer.from?.hash || transfer.from)?.toLowerCase() === fromAddress.toLowerCase()
       );
 
       if (tokenTransfer) {
@@ -591,22 +551,15 @@ class BlockscoutClient {
     try {
       logger.info(`Fetching token transfers for address: ${address}`);
 
-      const response = await this.client.get('/api', {
+      // Use v2 API format: /api/v2/addresses/{address}/token-transfers
+      const response = await this.client.get(`/api/v2/addresses/${address}/token-transfers`, {
         params: {
-          module: 'account',
-          action: 'tokentx',
-          address,
-          startblock: startBlock,
-          endblock: endBlock,
-          sort: 'desc',
+          type: 'ERC-20,ERC-721,ERC-1155',
         },
       });
 
-      if (response.data.status !== '1') {
-        return [];
-      }
-
-      return response.data.result.map(transfer => this.normalizeTokenTransfer(transfer));
+      const transfers = response.data.items || [];
+      return transfers.map(transfer => this.normalizeTokenTransfer(transfer));
     } catch (error) {
       logger.error('Error fetching token transfers', {
         address,
@@ -620,47 +573,52 @@ class BlockscoutClient {
 
   normalizeTransactionData(txData) {
     // Convert Wei to ETH for regular transactions (similar to token transfers)
-    const rawValue = txData.value || '0';
+    const rawValue = txData.value?.value || txData.value || '0';
     const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to ETH
 
     return {
       hash: txData.hash,
-      from: txData.from,
-      to: txData.to,
+      from: txData.from?.hash || txData.from,
+      to: txData.to?.hash || txData.to,
       value: rawValue, // Keep raw Wei value for reference
       actualAmount: actualValue, // Converted ETH value for calculations
-      gasUsed: txData.gasUsed,
-      gasPrice: txData.gasPrice,
-      blockNumber: txData.blockNumber,
-      timestamp: new Date(parseInt(txData.timeStamp) * 1000),
-      status: txData.success ? 'success' : 'failed',
-      input: txData.input,
+      gasUsed: txData.gas_used || txData.gasUsed,
+      gasPrice: txData.gas_price || txData.gasPrice,
+      blockNumber: txData.block || txData.blockNumber,
+      timestamp: new Date(txData.timestamp || parseInt(txData.timeStamp) * 1000),
+      status: txData.status === 'ok' || txData.success ? 'success' : 'failed',
+      input: txData.raw_input || txData.input,
       nonce: txData.nonce,
-      transactionIndex: txData.transactionIndex,
+      transactionIndex: txData.position || txData.transactionIndex,
       confirmations: txData.confirmations,
       logs: txData.logs,
+      // Add token information if present
+      tokenTransfers: txData.token_transfers || [],
     };
   }
 
   normalizeTokenTransfer(transfer) {
-    const decimals = parseInt(transfer.tokenDecimal) || 18;
-    const rawAmount = transfer.value;
+    // Handle v2 API format
+    const token = transfer.token || {};
+    const decimals = parseInt(token.decimals || transfer.tokenDecimal) || 18;
+    const rawAmount = transfer.total?.value || transfer.value || '0';
     const actualAmount = parseFloat(rawAmount) / Math.pow(10, decimals);
 
     return {
-      hash: transfer.hash,
-      from: transfer.from,
-      to: transfer.to,
+      hash: transfer.transaction_hash || transfer.hash,
+      from: transfer.from?.hash || transfer.from,
+      to: transfer.to?.hash || transfer.to,
       value: rawAmount,
       actualAmount: actualAmount,
-      tokenName: transfer.tokenName,
-      tokenSymbol: transfer.tokenSymbol,
+      tokenName: token.name || transfer.tokenName,
+      tokenSymbol: token.symbol || transfer.tokenSymbol,
       tokenDecimal: decimals,
-      contractAddress: transfer.contractAddress,
-      blockNumber: transfer.blockNumber,
-      timestamp: new Date(parseInt(transfer.timeStamp) * 1000),
-      gasUsed: transfer.gasUsed,
-      gasPrice: transfer.gasPrice,
+      contractAddress: token.address || transfer.contractAddress,
+      blockNumber: transfer.block_number || transfer.blockNumber,
+      timestamp: new Date(transfer.timestamp || parseInt(transfer.timeStamp) * 1000),
+      gasUsed: transfer.gas_used || transfer.gasUsed,
+      gasPrice: transfer.gas_price || transfer.gasPrice,
+      type: transfer.type || 'ERC-20',
     };
   }
 
@@ -669,20 +627,24 @@ class BlockscoutClient {
    */
   normalizeInternalTransaction(tx) {
     // Convert Wei to ETH for internal transactions
-    const rawValue = tx.value || '0';
+    const rawValue = tx.value?.value || tx.value || '0';
     const actualValue = parseFloat(rawValue) / Math.pow(10, 18); // Convert Wei to ETH
 
     return {
-      hash: tx.hash,
-      from: tx.from,
-      to: tx.to,
+      hash: tx.transaction_hash || tx.hash,
+      from: tx.from?.hash || tx.from,
+      to: tx.to?.hash || tx.to,
       value: rawValue, // Keep raw Wei value for reference
       actualAmount: actualValue, // Converted ETH value for calculations
-      blockNumber: tx.blockNumber,
-      timestamp: new Date(parseInt(tx.timeStamp) * 1000),
+      blockNumber: tx.block_number || tx.blockNumber,
+      timestamp: new Date(tx.timestamp || parseInt(tx.timeStamp) * 1000),
       type: tx.type || 'call',
-      traceId: tx.traceId,
-      isError: tx.isError === '1',
+      traceId: tx.transaction_index || tx.traceId,
+      isError: tx.success === false || tx.isError === '1',
+      // Additional v2 API fields
+      gas: tx.gas,
+      gasUsed: tx.gas_used,
+      error: tx.error,
     };
   }
 
@@ -692,26 +654,23 @@ class BlockscoutClient {
     try {
       logger.info(`Fetching account balance for address: ${address}`);
 
-      const response = await this.client.get('/api', {
-        params: {
-          module: 'account',
-          action: 'balance',
-          address,
-        },
-      });
+      // Use v2 API format: /api/v2/addresses/{address}
+      const response = await this.client.get(`/api/v2/addresses/${address}`);
 
-      if (response.data.status !== '1') {
-        throw new AppError(`Failed to get balance for address: ${address}`, 404);
-      }
+      const addressData = response.data;
+      const balance = addressData.coin_balance || '0';
 
       return {
         address,
-        balance: response.data.result,
-        balanceEth: (parseInt(response.data.result) / Math.pow(10, 18)).toString(),
+        balance: balance,
+        balanceEth: (parseInt(balance) / Math.pow(10, 18)).toString(),
+        // Additional v2 API data
+        transactionsCount: addressData.transactions_count || 0,
+        tokenBalances: addressData.token_balances || [],
       };
     } catch (error) {
-      if (error instanceof AppError) {
-        throw error;
+      if (error.response?.status === 404) {
+        throw new AppError(`Address not found: ${address}`, 404);
       }
 
       logger.error('Error fetching account balance', {
