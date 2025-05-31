@@ -248,13 +248,13 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
+    <div className="min-h-screen bg-gray-50 flex flex-col h-screen overflow-hidden">
       {/* Top Navigation */}
-      <nav className="bg-white shadow-sm border-b">
+      <nav className="bg-white shadow-sm border-b flex-shrink-0">
         <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex items-center">
-              <h1 className="text-xl font-semibold text-gray-900">AI Bookkeeping</h1>
+              <h1 className="text-xl font-semibold text-gray-900">AccountingOne</h1>
               {aiHealth && (
                 <div className="ml-4 flex items-center space-x-2">
                   <div className={`w-2 h-2 rounded-full ${aiHealth.overall ? 'bg-green-500' : 'bg-red-500'}`}></div>
@@ -284,11 +284,12 @@ export default function DashboardPage() {
         </div>
       </nav>
 
-      {/* Main Content */}
-      <div className="flex-1 flex">
+      {/* Main Content - Split Layout */}
+      <div className="flex-1 flex overflow-hidden">
         {/* Left Side - Chat Interface */}
         <div className="w-1/2 bg-white border-r border-gray-200 flex flex-col">
-          <div className="p-4 border-b border-gray-200">
+          {/* Chat Header - Fixed */}
+          <div className="p-4 border-b border-gray-200 flex-shrink-0">
             <h2 className="text-lg font-semibold text-gray-900 flex items-center">
               <CpuChipIcon className="h-5 w-5 mr-2 text-blue-600" />
               AI Assistant
@@ -296,7 +297,7 @@ export default function DashboardPage() {
             <p className="text-sm text-gray-600">Powered by Gemini AI • Ask about transactions, journal entries, or accounting</p>
           </div>
 
-          {/* Messages */}
+          {/* Chat Messages - Scrollable */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map((message) => (
               <div key={message.id} className="space-y-2">
@@ -397,8 +398,8 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* Message Input */}
-          <div className="p-4 border-t border-gray-200">
+          {/* Chat Input - Fixed at Bottom */}
+          <div className="p-4 border-t border-gray-200 flex-shrink-0 bg-white">
             <div className="flex space-x-2">
               <textarea
                 value={inputMessage}
@@ -424,7 +425,8 @@ export default function DashboardPage() {
 
         {/* Right Side - Journal Entries */}
         <div className="w-1/2 bg-gray-50 flex flex-col">
-          <div className="p-4 bg-white border-b border-gray-200">
+          {/* Journal Header - Fixed */}
+          <div className="p-4 bg-white border-b border-gray-200 flex-shrink-0">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <DocumentTextIcon className="h-5 w-5 mr-2 text-green-600" />
@@ -449,6 +451,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Journal Entries - Scrollable */}
           <div className="flex-1 overflow-y-auto p-4">
             {loadingEntries ? (
               <div className="flex items-center justify-center h-32">
