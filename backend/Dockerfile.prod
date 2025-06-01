@@ -1,0 +1,92 @@
+# Production Dockerfile for AccountingOne Backend
+FROM node:18-alpine AS base
+
+# Install dependencies needed for native modules
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    libc6-compat
+
+WORKDIR /app
+
+# Dependencies stage
+FROM base AS deps
+# Copy package files from backend directory (since build context is project root)
+COPY backend/package*.json ./
+
+# Use npm install if package-lock.json is not available, otherwise use npm ci
+RUN if [ -f package-lock.json ]; then \
+        npm ci --include=dev --no-audit --no-fund; \
+    else \
+        npm install --no-audit --no-fund; \
+    fi && \
+    npm cache clean --force
+
+# Builder stage - remove test files and prepare for production
+FROM base AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+# Copy all backend files from correct path
+COPY backend/ .
+
+# Remove all test files, debug files, and development-only files
+RUN rm -rf \
+    test-*.js \
+    debug-*.js \
+    comprehensive-pipeline-test.js \
+    analyze-wallet.js \
+    migrate-*.js \
+    add-*.sql \
+    migration.sql \
+    quick-ftso-test.js \
+    run-usd-migration.js \
+    check-narrative.js \
+    verify-contract.js \
+    update-coston2-crypto-assets.js \
+    *.md \
+    logs/ \
+    tests/ \
+    .eslintrc.js
+
+# Install only production dependencies
+RUN if [ -f package-lock.json ]; then \
+        npm ci --only=production --no-audit --no-fund; \
+    else \
+        npm install --only=production --no-audit --no-fund; \
+    fi && \
+    npm cache clean --force
+
+# Production runtime stage
+FROM node:18-alpine AS runner
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    libc6-compat
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Copy only necessary files
+COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/package.json ./package.json
+
+# Create logs directory with proper permissions
+RUN mkdir -p logs && chown nodejs:nodejs logs
+
+USER nodejs
+
+# Expose port
+EXPOSE 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:3001/health || exit 1
+
+# Start the application
+CMD ["npm", "start"] 
