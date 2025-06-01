@@ -60,14 +60,27 @@ const corsOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim())
   : ['http://localhost:3000'];
 
+// Debug logging to see what's happening
+console.log('🔧 CORS Debug Info:');
+console.log('Raw CORS_ORIGIN env var:', process.env.CORS_ORIGIN);
+console.log('Parsed CORS origins:', corsOrigins);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+
 app.use(cors({
   origin: function (origin, callback) {
+    console.log('🌐 CORS request from origin:', origin);
+    
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log('✅ Allowing request with no origin');
+      return callback(null, true);
+    }
     
     if (corsOrigins.includes(origin)) {
+      console.log('✅ Origin allowed:', origin);
       callback(null, true);
     } else {
+      console.log('❌ Origin rejected:', origin, 'Not in allowed list:', corsOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
